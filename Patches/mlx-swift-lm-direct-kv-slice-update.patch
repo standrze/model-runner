@@ -1,8 +1,8 @@
 diff --git a/Libraries/MLXLMCommon/KVCache.swift b/Libraries/MLXLMCommon/KVCache.swift
-index 22e5cd8e..03bfde7f 100644
+index 22e5cd8e..8a08bff9 100644
 --- a/Libraries/MLXLMCommon/KVCache.swift
 +++ b/Libraries/MLXLMCommon/KVCache.swift
-@@ -386,6 +386,20 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
+@@ -386,6 +386,13 @@ public func createSSMMask(h: MLXArray, cache: MambaCache?) -> MLXArray? {
      return nil
  }
  
@@ -10,20 +10,13 @@ index 22e5cd8e..03bfde7f 100644
 +private func updateKVCacheSlice(
 +    _ cache: MLXArray, with update: MLXArray, range: Range<Int>
 +) {
-+    cache.updateSlice(
-+        with: update,
-+        starts: [0, 0, Int32(range.lowerBound), 0],
-+        ends: [
-+            Int32(cache.dim(0)), Int32(cache.dim(1)), Int32(range.upperBound),
-+            Int32(cache.dim(3)),
-+        ],
-+        strides: [1, 1, 1, 1])
++    cache.updateSliceAxis2(with: update, range: range)
 +}
 +
  /// Standard KV cache implementation based on Python's KVCache
  /// See https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/base.py#L11
  public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
-@@ -437,8 +451,8 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
+@@ -437,8 +444,8 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
  
          self.offset += keys.dim(2)
  
@@ -34,7 +27,7 @@ index 22e5cd8e..03bfde7f 100644
  
          let returnedKeys = self.keys![.ellipsis, ..<self.offset, 0...]
          let returnedValues = self.values![.ellipsis, ..<self.offset, 0...]
-@@ -724,8 +738,8 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
+@@ -724,8 +731,8 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
          }
  
          // Assign

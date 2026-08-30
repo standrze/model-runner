@@ -93,16 +93,27 @@ require_exact_targets \
   "Libraries/MLXLMCommon/KVCache.swift" \
   "Tests/MLXLMTests/KVCacheTests.swift"
 
-# The lower-level API must call mlx_slice_update directly and replace the
-# existing wrapper's backing context. Reassigning the Swift MLXArray would lose
-# the stable identity that this optimization is intended to preserve.
-require_added_count 1 'public func updateSlice(' "$MLX_SWIFT_PATCH"
+# The lower-level API must call mlx_slice_update directly, use fixed inline
+# bounds, and update the existing C wrapper. Allocating generic Swift bounds
+# arrays or a temporary MLXArray would reintroduce per-layer decode overhead.
+require_added_count 1 'public func updateSliceAxis2(' "$MLX_SWIFT_PATCH"
 require_added_count 1 'with update: MLXArray' "$MLX_SWIFT_PATCH"
+require_added_count 1 'var bounds = SIMD16<Int32>(' "$MLX_SWIFT_PATCH"
+require_added_count 1 'withUnsafePointer(to: &bounds)' "$MLX_SWIFT_PATCH"
+require_added_count 1 'withMemoryRebound(to: Int32.self, capacity: 16)' "$MLX_SWIFT_PATCH"
 require_added_count 1 'mlx_slice_update(' "$MLX_SWIFT_PATCH"
-require_added_count 1 '_updateInternal(' "$MLX_SWIFT_PATCH"
+require_added_count 1 'mlx_array_set(&ctx, result)' "$MLX_SWIFT_PATCH"
+require_added_count 1 'mlx_array_free(result)' "$MLX_SWIFT_PATCH"
+require_added_count 0 'withUnsafeTemporaryAllocation' "$MLX_SWIFT_PATCH"
+require_added_count 0 'MLXArray(result)' "$MLX_SWIFT_PATCH"
+require_added_count 0 '_updateInternal(' "$MLX_SWIFT_PATCH"
+require_added_count 0 'starts: [Int32]' "$MLX_SWIFT_PATCH"
+require_added_count 0 'ends: [Int32]' "$MLX_SWIFT_PATCH"
+require_added_count 0 'strides: [Int32]' "$MLX_SWIFT_PATCH"
 require_added_count 1 'testDirectSliceUpdatePreservesIdentityAndAvoidsShapeOperations' \
   "$MLX_SWIFT_PATCH"
 require_added_count 1 'XCTAssertEqual(ObjectIdentifier(a), identity)' "$MLX_SWIFT_PATCH"
+require_added_count 1 'XCTAssertEqual(a.ctx.ctx, cWrapperIdentity)' "$MLX_SWIFT_PATCH"
 require_added_count 1 'description.contains("SliceUpdate")' "$MLX_SWIFT_PATCH"
 require_added_count 1 'description.contains("Broadcast")' "$MLX_SWIFT_PATCH"
 require_added_count 1 'description.contains("Reshape")' "$MLX_SWIFT_PATCH"
@@ -121,7 +132,10 @@ require_removed_count 1 'self.values![.ellipsis, idx ..< (idx + S), 0...] = valu
 require_added_count 5 'updateKVCacheSlice(' "$MLX_SWIFT_LM_PATCH"
 require_added_count 2 'range: previous ..< self.offset' "$MLX_SWIFT_LM_PATCH"
 require_added_count 2 'range: idx ..< (idx + S)' "$MLX_SWIFT_LM_PATCH"
-require_added_count 1 '.updateSlice(' "$MLX_SWIFT_LM_PATCH"
+require_added_count 1 '.updateSliceAxis2(' "$MLX_SWIFT_LM_PATCH"
+require_added_count 0 'starts: [' "$MLX_SWIFT_LM_PATCH"
+require_added_count 0 'ends: [' "$MLX_SWIFT_LM_PATCH"
+require_added_count 0 'strides: [' "$MLX_SWIFT_LM_PATCH"
 require_added_count 1 'testSimpleCacheDirectSliceUpdatePreservesIdentityUntilGrowth' \
   "$MLX_SWIFT_LM_PATCH"
 require_added_count 1 'testRotatingCacheDirectSliceUpdatePreservesIdentityAcrossWrap' \
