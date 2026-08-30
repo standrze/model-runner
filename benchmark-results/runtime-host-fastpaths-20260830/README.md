@@ -8,6 +8,7 @@
 - Isolated rebuild of v3 binary SHA-256: `59536631ba31e251bd0f71424262aa334faa48cf86fa8d9df60afdcab97ce93c`.
 - Property-wrapper v4 binary SHA-256: `335736124f6112c2da566f53c3f687440661939874f59edec911372ecea1ac97`.
 - Single-generation-pool candidate binary SHA-256: `74611b9fd8c5de032e8a97c321f0c269ab2c2c013c25921936ad202c82db4772`.
+- Autorelease + in-place decoder v6 binary SHA-256: `b2c4a7c39d7058e38a00fba686b6a2a1464260a7abd6483144d5fa49b10537e3`.
 - Every binary uses metallib SHA-256 `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`.
 
 All reports use the same local Laguna XS 2.1 Abliterated Q4R8 ScaleSearch model,
@@ -50,3 +51,30 @@ The `mediaanalysis-contended` directory is diagnostic only. macOS
 not be used as acceptance evidence. The same system load interrupted the first
 attempt in `quiet-autorelease`; incomplete/failed brackets are intentionally
 retained for auditability.
+
+## Autorelease + in-place decoder campaign: preserved, not promoted
+
+The v6 composite keeps the single-generation-pool change and additionally
+updates MLXLM's token-loop handler to mutate its decoder in place. The source
+candidate, focused dependency tests, full 102-test project suite, and a real
+Laguna generation all pass. Every one of the 56 measured campaign generations
+also produced byte-identical content SHA-256
+`5b8e8efa2dd96fdc936e519d6f0922a1d4b0693dbf13167abfdea592d54d5946`
+with the expected Metal, prompt, cache, generation-count, and length-stop
+invariants.
+
+The clean ABBA bracket (`v3 -> v6 -> v6 -> v3`) measured geometric medians of
+`174.019540 tok/s` for v3 and `173.658860 tok/s` for v6, an exact
+`-0.207264%` effect. The clean reverse BAAB bracket (`v6 -> v3 -> v3 -> v6`)
+measured `172.458343 tok/s` for v3 and `175.075400 tok/s` for v6, an exact
+`+1.517501%` effect. All per-block stability, endpoint-drift, correctness, and
+host-load gates passed in both brackets; the monitored background processes
+were idle throughout.
+
+Balancing the two bracket orders geometrically gives `173.237183 tok/s` for v3
+and `174.365692 tok/s` for v6, or `+0.651424%`. The valid bracket estimates
+disagree by `1.724765` percentage points and cross zero, so the campaign is
+inconclusive and remains below the predeclared `+1%` acceptance gate. This is
+weak positive directional evidence, not a measured speed milestone. The
+candidate is preserved at tag `token-loop-decoder-candidate-v1`; accepted
+production `main` remains zero-wrapper v3 at `7238a63`.
