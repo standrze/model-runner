@@ -26,6 +26,9 @@ MLX_C_SOURCE_CLEAR_STREAMS_PATCH="$PACKAGE_ROOT/Patches/mlx-c-clear-streams.patc
 MLX_C_SOURCE_CLEAR_GLOBAL_STREAMS_PATCH="$PACKAGE_ROOT/Patches/mlx-c-clear-global-streams.patch"
 MLX_C_SOURCE_DARWIN_EXPECTED_REVISION="c74db5307cc8ce122f48d97ef951b30578674e7f"
 MLX_C_SOURCE_LINUX_EXPECTED_REVISION="fba4470b89073180056c9ea46c443051375f7399"
+SWIFT_TRANSFORMERS_CHECKOUT="$MODEL_RUNNER_SWIFTPM_SCRATCH_PATH/checkouts/swift-transformers"
+SWIFT_TRANSFORMERS_INCREMENTAL_BYTELEVEL_PATCH="$PACKAGE_ROOT/Patches/swift-transformers-incremental-bytelevel-decoder.patch"
+SWIFT_TRANSFORMERS_EXPECTED_REVISION="2fa33e1f5e7131a7fc64c28e6d161dcec0d24820"
 MLX_SWIFT_LM_CHECKOUT="$MODEL_RUNNER_SWIFTPM_SCRATCH_PATH/checkouts/mlx-swift-lm"
 MLX_SWIFT_LM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-ignore-readmes.patch"
 MLX_SWIFT_LM_COREFOUNDATION_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-corefoundation-linux.patch"
@@ -38,6 +41,8 @@ MLX_SWIFT_LM_MTP_DECODE_SCHEDULING_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp
 MLX_SWIFT_LM_MTP_FIRST_REJECTION_DIAGNOSTIC_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp-first-rejection-diagnostic.patch"
 MLX_SWIFT_LM_CHAT_SESSION_SNAPSHOT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-chat-session-snapshot.patch"
 MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-direct-kv-slice-update.patch"
+MLX_SWIFT_LM_TOKEN_LOOP_DECODER_IN_PLACE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-token-loop-decoder-in-place.patch"
+MLX_SWIFT_LM_INCREMENTAL_BYTELEVEL_STREAMING_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-incremental-bytelevel-streaming.patch"
 MLX_SWIFT_LM_Q4_AFFINE_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_CENTERED_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-centered-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_BIAS_REFINEMENT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-bias-refinement.patch"
@@ -210,6 +215,8 @@ verify_checkout_revision \
   "mlx source" "$MLX_SOURCE_CHECKOUT" "$MLX_SOURCE_EXPECTED_REVISION"
 verify_checkout_revision \
   "mlx-c source" "$MLX_C_SOURCE_CHECKOUT" "$MLX_C_SOURCE_EXPECTED_REVISION"
+verify_checkout_revision \
+  "swift-transformers" "$SWIFT_TRANSFORMERS_CHECKOUT" "$SWIFT_TRANSFORMERS_EXPECTED_REVISION"
 
 if [[ "$APPLY_LINUX_DEPENDENCY_PATCHES" == "1" ]]; then
   apply_dependency_patch \
@@ -251,6 +258,10 @@ apply_dependency_patch \
   "mlx-swift direct slice update" \
   "$MLX_SWIFT_CHECKOUT" \
   "$MLX_SWIFT_DIRECT_SLICE_UPDATE_PATCH"
+apply_dependency_patch \
+  "swift-transformers incremental ByteLevel decoder" \
+  "$SWIFT_TRANSFORMERS_CHECKOUT" \
+  "$SWIFT_TRANSFORMERS_INCREMENTAL_BYTELEVEL_PATCH"
 
 apply_dependency_patch \
   "mlx-swift-lm README warning fix" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_PATCH"
@@ -286,6 +297,14 @@ apply_dependency_patch \
   "mlx-swift-lm direct KV slice update" \
   "$MLX_SWIFT_LM_CHECKOUT" \
   "$MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH"
+apply_dependency_patch \
+  "mlx-swift-lm token-loop decoder in-place fast path" \
+  "$MLX_SWIFT_LM_CHECKOUT" \
+  "$MLX_SWIFT_LM_TOKEN_LOOP_DECODER_IN_PLACE_PATCH"
+apply_dependency_patch \
+  "mlx-swift-lm incremental ByteLevel streaming" \
+  "$MLX_SWIFT_LM_CHECKOUT" \
+  "$MLX_SWIFT_LM_INCREMENTAL_BYTELEVEL_STREAMING_PATCH"
 apply_dependency_patch \
   "mlx-swift-lm Q4 affine scale search" \
   "$MLX_SWIFT_LM_CHECKOUT" \
