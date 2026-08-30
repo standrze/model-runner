@@ -24,8 +24,11 @@ a tag.
 
 ## Current state
 
-- Accepted `origin/main`: `7238a63`, tagged `direct-kv-zero-wrapper-v3`
-- Accepted stable mean: `172.1080 tok/s`; best accepted block: `172.2590`
+- Accepted production milestone: `d79760e`, tagged
+  `laguna-fused-router-topk-production-v1`; `origin/main` includes it
+- Accepted default-on median: `185.291435150063 tok/s`; geometric mean:
+  `184.905172116502 tok/s`
+- Previous production baseline: `7238a63`, tagged `direct-kv-zero-wrapper-v3`
 - Historical Ollama Q4R8 ScaleSearch median: `179.5662 tok/s`
 - Tie threshold: greater than `179.5662 tok/s`
 - Five-percent win threshold: greater than `188.5445 tok/s`
