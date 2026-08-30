@@ -46,6 +46,7 @@ tree to a tag.
 | `incremental-bytelevel-decoder-candidate-v1` | `2b09357` | Preserved source candidate | Correctness passed |
 | `incremental-bytelevel-decoder-measured-v1` | `e120a83` | Small repeatable win | `+0.4822%` to `+0.5501%`; not promoted alone |
 | `consolidated-decoder-fast-path-candidate-v1` | `38604eb` | Clean v3 + incremental + in-place candidate | Composite benchmark pending |
+| `consolidated-decoder-fast-path-measured-v1` | this commit | Measured, neutral | `+0.127683%` balanced; not promoted |
 
 ## Clean consolidated candidate
 
@@ -61,8 +62,14 @@ isolated source tree has SHA-256
 `600dd4d515d08c077d6cc87f345013b20d1f438ba1bfa480be9a2a16f93272c6`;
 its metallib SHA-256 is
 `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`.
-A real Laguna Metal smoke generation passed. End-to-end promotion remains
-pending a clean bracket uncontaminated by background media analysis.
+A real Laguna Metal smoke generation passed. Clean forward and reverse
+brackets then measured the in-place decoder change against incremental-only.
+The balanced result was `+0.127683089728925%`, while the two order estimates
+spanned `-0.044236031372891%` to `+0.299897903475466%`. The implementation is
+correct but performance-neutral, so it is preserved at tag
+`consolidated-decoder-fast-path-measured-v1` and is not promoted. Raw reports
+and calculations are in
+`benchmark-results/consolidated-decoder-fast-path-20260830/`.
 
 ## Simple Swift server
 
