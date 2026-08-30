@@ -343,10 +343,11 @@ private struct ModelList: Encodable {
     struct Model: Encodable {
         let id: String
         let object = "model"
+        let created = Int(Date().timeIntervalSince1970)
         let ownedBy = "local"
 
         enum CodingKeys: String, CodingKey {
-            case id, object
+            case id, object, created
             case ownedBy = "owned_by"
         }
     }
@@ -459,19 +460,25 @@ private struct ErrorEnvelope: Encodable {
     }
 }
 
-let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
-guard FileManager.default.fileExists(atPath: options.modelURL.path) else {
-    throw AppError.request(.notFound, "Model path does not exist.", "model_not_found")
-}
-guard let metallibURL = Bundle.module.url(forResource: "mlx", withExtension: "metallib") else {
-    throw AppError.missingMetalLibrary
-}
-GPU.metallib = metallibURL
+do {
+    let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
+    guard FileManager.default.fileExists(atPath: options.modelURL.path) else {
+        throw AppError.request(.notFound, "Model path does not exist.", "model_not_found")
+    }
+    guard let metallibURL = Bundle.module.url(forResource: "mlx", withExtension: "metallib") else {
+        throw AppError.missingMetalLibrary
+    }
+    GPU.metallib = metallibURL
 
-print("Loading \(options.modelURL.path)…")
-let container = try await LLMModelFactory.shared.loadContainer(
-    from: options.modelURL,
-    using: #huggingFaceTokenizerLoader()
-)
-let server = ModelServer(container: container, modelName: options.modelURL.lastPathComponent)
-try await server.run(host: options.host, port: options.port)
+    print("Loading \(options.modelURL.path)…")
+    let container = try await LLMModelFactory.shared.loadContainer(
+        from: options.modelURL,
+        using: #huggingFaceTokenizerLoader()
+    )
+    let server = ModelServer(container: container, modelName: options.modelURL.lastPathComponent)
+    try await server.run(host: options.host, port: options.port)
+} catch {
+    let message = "Error: \(error.localizedDescription)\n"
+    FileHandle.standardError.write(Data(message.utf8))
+    exit(EXIT_FAILURE)
+}
