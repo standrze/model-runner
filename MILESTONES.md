@@ -55,6 +55,13 @@ as an Ollama comparison, and the relative effect misses the `+1%` gate by a
 wide margin. Raw evidence is under
 `benchmark-results/laguna-compiled-attention-prelude-20260830/`.
 
+The last-stream Metal command-encoder lookup cache is also correct but
+performance-neutral. On the exact Q4R8 ScaleSearch checkpoint, its median
+effect was `-0.053761301784%` and its order-balanced geometric effect was
+`-0.016529798294%`. A second standard-Q4 screen was likewise neutral. Raw
+evidence is under `benchmark-results/metal-command-encoder-cache-20260830/`;
+the cache remains disabled by default and is not promoted.
+
 ## Performance milestone index
 
 | Tag | Commit | Status | Result or disposition |
@@ -82,7 +89,9 @@ wide margin. Raw evidence is under
 | `laguna-fused-qkvg-candidate-v1` | `f6feaf2` | Guarded fused Q/K/V/gate projection | Short-horizon tests passed; Release screening required |
 | `laguna-fused-qkvg-rejected-v1` | `62d7ea7` | Same-loaded failure evidence | `-0.171863260430%`; 128-token streams diverged; rejected |
 | `laguna-compiled-attention-prelude-candidate-v1` | `6949c23` | Separate-width decode-only compiled prelude | Eleven focused Laguna tests and real Q4 smoke passed exactly |
-| `laguna-compiled-attention-prelude-measured-v1` | this commit | Same-loaded alternating A/B evidence | `+0.034787554331%` order-balanced; performance-neutral, not promoted |
+| `laguna-compiled-attention-prelude-measured-v1` | `fc9b71f` | Same-loaded alternating A/B evidence | `+0.034787554331%` order-balanced; performance-neutral, not promoted |
+| `metal-command-encoder-cache-candidate-v1` | `b27d10b` | Default-off last-stream encoder cache | Host-Metal functional and Laguna regression tests passed |
+| `metal-command-encoder-cache-measured-v1` | this commit | Exact-model same-loaded alternating A/B evidence | `-0.016529798294%` order-balanced; performance-neutral, not promoted |
 
 ## Clean incremental candidate
 
@@ -170,6 +179,28 @@ All measured outputs match exactly, and all six paired effects fall between
 an Ollama comparison because `mediaanalysisd` consumed roughly 128-132% CPU
 during the campaign. The near-zero alternating relative result is sufficient
 to classify the candidate as neutral and keep it out of production.
+
+## Rejected Metal command-encoder cache
+
+Branch `codex/global-encoder-cache-fast-path` starts from the measured compiled
+block-tail milestone. It adds a default-off, generation-invalidated,
+thread-local cache for the last Metal stream's `CommandEncoder`. The A/B harness
+keeps the compiled attention gate, MoE, and block tail enabled in both arms.
+
+- Source tag: `metal-command-encoder-cache-candidate-v1`
+- Candidate release binary SHA-256:
+  `2239e5f0200e02e7fb4066b1f0854bab04ac48ae76cc00161967298f88e1a726`
+- Shared metallib SHA-256:
+  `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`
+- Exact ScaleSearch median: OFF `177.099891139778 tok/s`, ON
+  `177.004679932843 tok/s`
+- Serialized median effect: `-0.053761301784%`
+- Order-balanced geometric effect: `-0.016529798294%`
+
+All primary outputs match exactly. Darwin and Linux patch-cycle checks, the
+GPU-backed toggle test, and all nine focused Laguna tests pass. The effect is
+neutral to slightly negative, so this candidate is preserved as a rollback
+boundary and excluded from production.
 
 ## Standalone Swift server
 
