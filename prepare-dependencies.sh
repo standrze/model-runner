@@ -28,6 +28,7 @@ MLX_C_SOURCE_DARWIN_EXPECTED_REVISION="c74db5307cc8ce122f48d97ef951b30578674e7f"
 MLX_C_SOURCE_LINUX_EXPECTED_REVISION="fba4470b89073180056c9ea46c443051375f7399"
 SWIFT_TRANSFORMERS_CHECKOUT="$MODEL_RUNNER_SWIFTPM_SCRATCH_PATH/checkouts/swift-transformers"
 SWIFT_TRANSFORMERS_INCREMENTAL_BYTELEVEL_PATCH="$PACKAGE_ROOT/Patches/swift-transformers-incremental-bytelevel-decoder.patch"
+SWIFT_TRANSFORMERS_STABLE_STRING_CACHE_PATCH="$PACKAGE_ROOT/Patches/swift-transformers-stable-string-cache.patch"
 SWIFT_TRANSFORMERS_EXPECTED_REVISION="2fa33e1f5e7131a7fc64c28e6d161dcec0d24820"
 MLX_SWIFT_LM_CHECKOUT="$MODEL_RUNNER_SWIFTPM_SCRATCH_PATH/checkouts/mlx-swift-lm"
 MLX_SWIFT_LM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-ignore-readmes.patch"
@@ -262,6 +263,10 @@ apply_dependency_patch \
   "swift-transformers incremental ByteLevel decoder" \
   "$SWIFT_TRANSFORMERS_CHECKOUT" \
   "$SWIFT_TRANSFORMERS_INCREMENTAL_BYTELEVEL_PATCH"
+apply_dependency_patch \
+  "swift-transformers stable short-string cache" \
+  "$SWIFT_TRANSFORMERS_CHECKOUT" \
+  "$SWIFT_TRANSFORMERS_STABLE_STRING_CACHE_PATCH"
 
 apply_dependency_patch \
   "mlx-swift-lm README warning fix" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_PATCH"

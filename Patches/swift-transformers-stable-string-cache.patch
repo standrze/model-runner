@@ -1,0 +1,173 @@
+diff --git a/Sources/Tokenizers/Decoder.swift b/Sources/Tokenizers/Decoder.swift
+--- a/Sources/Tokenizers/Decoder.swift
++++ b/Sources/Tokenizers/Decoder.swift
+@@ -33,6 +33,8 @@
+ final class ByteLevelIncrementalDecodingTable: Sendable {
+     static let maximumDenseTokenID = 1_000_000
+     static let maximumDecodedByteCount = 32 * 1_024 * 1_024
++    static let maximumStableStringCacheTokenCount = 262_144
++    static let maximumCachedStableStringUTF8Count = 15
+
+     struct Entry: Sendable {
+         static let missingLength: Int32 = -1
+@@ -48,6 +50,7 @@
+     let entries: [Entry]
+     let bytes: [UTF8.CodeUnit]
+     let addedTokenLiterals: [Int: String]
++    let stableShortChunks: [String?]?
+
+     init?(
+         model: any TokenizingModel,
+@@ -63,6 +66,10 @@
+         var entries = Array(repeating: Entry.missing, count: tokenCount)
+         var bytes: [UTF8.CodeUnit] = []
+         var literals: [Int: String] = [:]
++        var stableShortChunks: [String?]? =
++            tokenCount <= Self.maximumStableStringCacheTokenCount
++            ? Array(repeating: nil, count: tokenCount)
++            : nil
+         bytes.reserveCapacity(tokenCount * 7)
+         literals.reserveCapacity(addedTokens.count)
+
+@@ -83,6 +90,15 @@
+             guard offset <= Int(Int32.max), bytes.count - offset <= Int(Int32.max) else {
+                 return nil
+             }
++            if stableShortChunks != nil {
++                let decoded = String(decoding: bytes[offset...], as: UTF8.self)
++                if
++                    decoded.last != "\u{fffd}",
++                    decoded.utf8.count <= Self.maximumCachedStableStringUTF8Count
++                {
++                    stableShortChunks?[id] = decoded
++                }
++            }
+             entries[id] = Entry(
+                 offset: Int32(offset),
+                 length: Int32(bytes.count - offset))
+@@ -91,6 +107,7 @@
+         self.entries = entries
+         self.bytes = bytes
+         self.addedTokenLiterals = literals
++        self.stableShortChunks = stableShortChunks
+     }
+ }
+
+@@ -138,6 +155,12 @@
+             let end = offset + Int(entry.length)
+             let bytes = table.bytes[offset..<end]
+             if pendingBytes.isEmpty, withheldText.isEmpty {
++                if
++                    let stableShortChunks = table.stableShortChunks,
++                    let cached = stableShortChunks[token]
++                {
++                    return cached
++                }
+                 let text = String(decoding: bytes, as: UTF8.self)
+                 guard text.last == "\u{fffd}" else { return text }
+                 pendingBytes.append(contentsOf: bytes)
+diff --git a/Tests/TokenizersTests/IncrementalByteLevelDecoderTests.swift b/Tests/TokenizersTests/IncrementalByteLevelDecoderTests.swift
+--- a/Tests/TokenizersTests/IncrementalByteLevelDecoderTests.swift
++++ b/Tests/TokenizersTests/IncrementalByteLevelDecoderTests.swift
+@@ -79,6 +79,37 @@
+                 skipSpecialTokens: skipSpecialTokens))
+     }
+
++    private func makeTable(
++        _ pieces: [Int: String],
++        addedTokens: [AddedToken] = []
++    ) throws -> ByteLevelIncrementalDecodingTable {
++        let tokenizerConfig = try config([
++            "tokenizer_class": "PreTrainedTokenizerFast"
++        ])
++        let tokenizerData = try config([
++            "model": [
++                "type": "BPE",
++                "vocab": Dictionary(uniqueKeysWithValues: pieces.map { ($0.value, $0.key) }),
++                "merges": [[String]](),
++            ] as [String: Any]
++        ])
++        let addedTokenIDs = Dictionary(
++            uniqueKeysWithValues: addedTokens.map { ($0.content, $0.id) })
++        let model = try BPETokenizer(
++            tokenizerConfig: tokenizerConfig,
++            tokenizerData: tokenizerData,
++            addedTokens: addedTokenIDs)
++        let maximumTokenID = max(
++            pieces.keys.max() ?? -1,
++            addedTokens.map(\.id).max() ?? -1)
++
++        return try #require(
++            ByteLevelIncrementalDecodingTable(
++                model: model,
++                tokenCount: maximumTokenID + 1,
++                addedTokens: Set(addedTokenIDs.keys)))
++    }
++
+     @Test("Emits stable ASCII and buffers an incomplete scalar run")
+     func splitUTF8() throws {
+         let emoji = Array("😀".utf8)
+@@ -125,8 +156,63 @@
+         #expect(first.append(token: 0) == nil)
+         #expect(second.append(token: 1) == nil)
+         #expect(first.append(token: 1) == "😀")
++    }
++
++    @Test("Caches only short, standalone-stable ordinary chunks")
++    func stableShortChunkClassification() throws {
++        let added = "<added>"
++        let fifteenBytes = String(repeating: "a", count: 15)
++        let sixteenBytes = String(repeating: "b", count: 16)
++        let internalReplacementBytes: [UTF8.CodeUnit] = [0xFF, 0x41]
++        let pieces = [
++            0: encoded(Array("A".utf8)),
++            1: encoded(Array(fifteenBytes.utf8)),
++            2: encoded(Array(sixteenBytes.utf8)),
++            3: encoded([0xFF]),
++            4: encoded(internalReplacementBytes),
++            5: added,
++            6: encoded([]),
++        ]
++        let table = try makeTable(
++            pieces,
++            addedTokens: [AddedToken(id: 5, content: added, special: false)])
++        let cache = try #require(table.stableShortChunks)
++
++        #expect(cache[0] == "A")
++        #expect(cache[1] == fifteenBytes)
++        #expect(cache[2] == nil)
++        #expect(cache[3] == nil)
++        #expect(cache[4] == String(decoding: internalReplacementBytes, as: UTF8.self))
++        #expect(cache[5] == nil)
++        #expect(cache[6] == "")
+     }
+
++    @Test("Pending UTF-8 uses raw bytes instead of a standalone cached chunk")
++    func pendingUTF8BypassesStableChunkCache() throws {
++        let pieces = [
++            0: encoded([0xC3]),
++            1: encoded([0xA9, 0x41]),
++        ]
++        let table = try makeTable(pieces)
++        let cache = try #require(table.stableShortChunks)
++        #expect(cache[1] == String(decoding: [0xA9, 0x41], as: UTF8.self))
++
++        var decoder = ByteLevelIncrementalTokenDecoder(table: table)
++        #expect(decoder.append(token: 0) == nil)
++        #expect(decoder.append(token: 1) == "éA")
++    }
++
++    @Test("Dense string caching is disabled above its bounded vocabulary cap")
++    func stableStringCacheVocabularyCap() throws {
++        let lastID = ByteLevelIncrementalDecodingTable.maximumStableStringCacheTokenCount
++        let table = try makeTable([
++            0: encoded(Array("A".utf8)),
++            lastID: encoded(Array("B".utf8)),
++        ])
++
++        #expect(table.stableShortChunks == nil)
++    }
++
+     @Test("Concatenated chunks preserve grapheme extensions across tokens")
+     func graphemeExtensionsAcrossTokens() throws {
+         for pair in [("a", "\u{0301}"), ("\r", "\n"), ("👩", "\u{200d}💻")] {
