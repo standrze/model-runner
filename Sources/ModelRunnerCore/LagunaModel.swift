@@ -19,6 +19,7 @@ public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true
   @TaskLocal public static var useCompiledMoEFusion = true
   @TaskLocal public static var useCompiledBlockTail = false
+  @TaskLocal public static var useCompiledAttentionPrelude = false
 }
 
 enum LagunaCompiledBlockTailEligibility {
@@ -38,6 +39,22 @@ enum LagunaCompiledBlockTailEligibility {
       && (cacheOffset ?? 0) > 0
       && useCompiledAttentionGate
       && useCompiledMoEFusion
+  }
+}
+
+enum LagunaCompiledAttentionPreludeEligibility {
+  static func allows(
+    runtimeEnabled: Bool,
+    capturesHiddenStates: Bool,
+    batchSize: Int,
+    sequenceLength: Int,
+    cacheOffset: Int?
+  ) -> Bool {
+    runtimeEnabled
+      && !capturesHiddenStates
+      && batchSize == 1
+      && sequenceLength == 1
+      && (cacheOffset ?? 0) > 0
   }
 }
 
@@ -387,11 +404,9 @@ private final class LagunaAttention: Module {
     super.init()
   }
 
-  func core(
-    _ x: MLXArray,
-    mask: MLXFast.ScaledDotProductAttentionMaskMode,
-    cache: KVCache?
-  ) -> MLXArray {
+  private func projectedQKV(_ x: MLXArray) -> (
+    queries: MLXArray, keys: MLXArray, values: MLXArray
+  ) {
     let batch = x.dim(0)
     let length = x.dim(1)
 
@@ -406,19 +421,63 @@ private final class LagunaAttention: Module {
     keys = keyNorm(keys).transposed(0, 2, 1, 3)
     let transposedValues = values.transposed(0, 2, 1, 3)
 
-    let offset = cache?.ropeOffset
-    queries = applyRotaryPosition(rope, to: queries, offset: offset)
-    keys = applyRotaryPosition(rope, to: keys, offset: offset)
+    return (queries, keys, transposedValues)
+  }
 
-    return attentionWithCacheUpdate(
+  func compiledDecodePrelude(_ x: MLXArray) -> [MLXArray] {
+    let projected = projectedQKV(x)
+    return [projected.queries, projected.keys, projected.values]
+  }
+
+  func attendProjected(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    cache: KVCache?
+  ) -> MLXArray {
+    let offset = cache?.ropeOffset
+    let rotatedQueries = applyRotaryPosition(rope, to: queries, offset: offset)
+    let rotatedKeys = applyRotaryPosition(rope, to: keys, offset: offset)
+    return attend(
+      queries: rotatedQueries,
+      keys: rotatedKeys,
+      values: values,
+      mask: mask,
+      cache: cache)
+  }
+
+  func attend(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    cache: KVCache?
+  ) -> MLXArray {
+    attentionWithCacheUpdate(
       queries: queries,
       keys: keys,
-      values: transposedValues,
+      values: values,
       cache: cache,
       scale: scale,
       mask: mask
     )
     .transposed(0, 2, 1, 3)
+  }
+
+  func core(
+    _ x: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    cache: KVCache?
+  ) -> MLXArray {
+    let projected = projectedQKV(x)
+    return attendProjected(
+      queries: projected.queries,
+      keys: projected.keys,
+      values: projected.values,
+      mask: mask,
+      cache: cache
+    )
   }
 
   func finish(
@@ -600,6 +659,15 @@ private final class LagunaTransformerBlock: Module {
       ]
     }
 
+  private lazy var compiledDecodeAttentionPrelude: @Sendable ([MLXArray]) -> [MLXArray] =
+    compile { [unowned self] inputs in
+      // MLX's dynamic-array RoPE offset is not bit-exact with its scalar-offset
+      // path, so deliberately stop this graph before rotary encoding.
+      let normalizedInput = self.inputNorm(inputs[0])
+      return [normalizedInput]
+        + self.attention.compiledDecodePrelude(normalizedInput)
+    }
+
   init(_ configuration: LagunaConfiguration, layerIndex: Int) {
     let attention = LagunaAttention(configuration, layerIndex: layerIndex)
     usesSlidingWindow = attention.usesSlidingWindow
@@ -626,20 +694,41 @@ private final class LagunaTransformerBlock: Module {
     useCompiledMoEFusion: Bool,
     useCompiledAttentionGate: Bool,
     useCompiledBlockTail: Bool,
+    useCompiledAttentionPrelude: Bool,
     capturesHiddenStates: Bool
   ) -> MLXArray {
     // Snapshot the offset before attention mutates the cache. This keeps a
     // one-token prompt at offset zero on the existing prefill path.
+    let cacheOffset = cache?.offset
     let useCompiledTail = LagunaCompiledBlockTailEligibility.allows(
       runtimeEnabled: useCompiledBlockTail,
       capturesHiddenStates: capturesHiddenStates,
       batchSize: x.dim(0),
       sequenceLength: x.dim(1),
-      cacheOffset: cache?.offset,
+      cacheOffset: cacheOffset,
       useCompiledAttentionGate: useCompiledAttentionGate,
       useCompiledMoEFusion: useCompiledMoEFusion)
-    let normalizedInput = inputNorm(x)
-    let perHeadOutput = attention.core(normalizedInput, mask: mask, cache: cache)
+    let useCompiledPrelude = LagunaCompiledAttentionPreludeEligibility.allows(
+      runtimeEnabled: useCompiledAttentionPrelude,
+      capturesHiddenStates: capturesHiddenStates,
+      batchSize: x.dim(0),
+      sequenceLength: x.dim(1),
+      cacheOffset: cacheOffset)
+    let normalizedInput: MLXArray
+    let perHeadOutput: MLXArray
+    if useCompiledPrelude, let cache {
+      let prelude = compiledDecodeAttentionPrelude([x])
+      normalizedInput = prelude[0]
+      perHeadOutput = attention.attendProjected(
+        queries: prelude[1],
+        keys: prelude[2],
+        values: prelude[3],
+        mask: mask,
+        cache: cache)
+    } else {
+      normalizedInput = inputNorm(x)
+      perHeadOutput = attention.core(normalizedInput, mask: mask, cache: cache)
+    }
     if useCompiledTail {
       return compiledDecodeTail([x, normalizedInput, perHeadOutput])[0]
     }
@@ -711,6 +800,7 @@ public final class LagunaModelInner: Module {
     let useCompiledMoEFusion = LagunaRuntimeTuning.useCompiledMoEFusion
     let useCompiledAttentionGate = LagunaRuntimeTuning.useCompiledAttentionGate
     let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail
+    let useCompiledAttentionPrelude = LagunaRuntimeTuning.useCompiledAttentionPrelude
     let capturesHiddenStates = !captureLayerIDs.isEmpty
     var captured = [MLXArray]()
     captured.reserveCapacity(captureLayerIDs.count)
@@ -740,6 +830,7 @@ public final class LagunaModelInner: Module {
         useCompiledMoEFusion: useCompiledMoEFusion,
         useCompiledAttentionGate: useCompiledAttentionGate,
         useCompiledBlockTail: useCompiledBlockTail,
+        useCompiledAttentionPrelude: useCompiledAttentionPrelude,
         capturesHiddenStates: capturesHiddenStates
       )
       if captureLayerIDs.contains(index) {

@@ -140,6 +140,32 @@ struct LagunaModelTests {
     #expect(!allows(useCompiledMoEFusion: false))
   }
 
+  @Test("Compiled attention prelude is restricted to ordinary cached decode")
+  func compiledAttentionPreludeEligibilityIsDecodeOnly() {
+    func allows(
+      runtimeEnabled: Bool = true,
+      capturesHiddenStates: Bool = false,
+      batchSize: Int = 1,
+      sequenceLength: Int = 1,
+      cacheOffset: Int? = 3
+    ) -> Bool {
+      LagunaCompiledAttentionPreludeEligibility.allows(
+        runtimeEnabled: runtimeEnabled,
+        capturesHiddenStates: capturesHiddenStates,
+        batchSize: batchSize,
+        sequenceLength: sequenceLength,
+        cacheOffset: cacheOffset)
+    }
+
+    #expect(allows())
+    #expect(!allows(runtimeEnabled: false))
+    #expect(!allows(capturesHiddenStates: true))
+    #expect(!allows(batchSize: 2))
+    #expect(!allows(sequenceLength: 2))
+    #expect(!allows(cacheOffset: nil))
+    #expect(!allows(cacheOffset: 0))
+  }
+
   @Test("Compiled block tail preserves cached one-token decode logits")
   func compiledBlockTailPreservesCachedDecodeLogits() throws {
     let configuration = try decodeConfiguration()
@@ -208,6 +234,61 @@ struct LagunaModelTests {
     #expect(eagerCache.allSatisfy { $0.offset == 4 })
     #expect(fallbackCache.allSatisfy { $0.offset == 4 })
     #expect(allClose(eager, fallback, rtol: 1e-2, atol: 1e-2).item(Bool.self))
+  }
+
+  @Test("Compiled attention prelude preserves cached logits and cache tensors exactly")
+  func compiledAttentionPreludePreservesCachedDecodeExactly() throws {
+    let configuration = try decodeConfiguration()
+    let model = LagunaModel(configuration)
+    let eagerCache = try model.newCache(parameters: nil)
+    let compiledCache = try model.newCache(parameters: nil)
+    let prompt = MLXArray([Int32(1), 2, 3])[.newAxis]
+
+    let eagerPrefill = LagunaRuntimeTuning.$useCompiledAttentionPrelude.withValue(false) {
+      LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+        model(prompt, cache: eagerCache)
+      }
+    }
+    let compiledPrefill = LagunaRuntimeTuning.$useCompiledAttentionPrelude.withValue(true) {
+      LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+        model(prompt, cache: compiledCache)
+      }
+    }
+    eval(eagerPrefill, compiledPrefill)
+    eval(eagerCache)
+    eval(compiledCache)
+    #expect(eagerPrefill.asArray(Float.self) == compiledPrefill.asArray(Float.self))
+
+    for token: Int32 in [4, 5] {
+      let nextToken = MLXArray([token])[.newAxis]
+      let eager = LagunaRuntimeTuning.$useCompiledAttentionPrelude.withValue(false) {
+        LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+          model(nextToken, cache: eagerCache)
+        }
+      }
+      let compiled = LagunaRuntimeTuning.$useCompiledAttentionPrelude.withValue(true) {
+        LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+          model(nextToken, cache: compiledCache)
+        }
+      }
+      eval(eager, compiled)
+      eval(eagerCache)
+      eval(compiledCache)
+
+      #expect(eager.asArray(Float.self) == compiled.asArray(Float.self))
+      #expect(eagerCache.count == compiledCache.count)
+      for (eagerEntry, compiledEntry) in zip(eagerCache, compiledCache) {
+        let eagerState = eagerEntry.state
+        let compiledState = compiledEntry.state
+        #expect(eagerState.count == compiledState.count)
+        for (eagerTensor, compiledTensor) in zip(eagerState, compiledState) {
+          #expect(eagerTensor.asArray(Float.self) == compiledTensor.asArray(Float.self))
+        }
+      }
+    }
+
+    #expect(eagerCache.allSatisfy { $0.offset == 5 })
+    #expect(compiledCache.allSatisfy { $0.offset == 5 })
   }
 
   private func decodeConfiguration(

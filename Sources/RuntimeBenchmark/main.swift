@@ -127,6 +127,24 @@ private struct LagunaBlockTailABComparison: Encodable {
   }
 }
 
+private struct LagunaAttentionPreludeABComparison: Encodable {
+  var trialsPerMode: Int
+  var eagerMedianDecodeTokensPerSecond: Double
+  var compiledMedianDecodeTokensPerSecond: Double
+  var compiledSpeedupPercent: Double
+  var outputsMatchExactly: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case trialsPerMode = "trials_per_mode"
+    case eagerMedianDecodeTokensPerSecond =
+      "eager_median_decode_tokens_per_second"
+    case compiledMedianDecodeTokensPerSecond =
+      "compiled_median_decode_tokens_per_second"
+    case compiledSpeedupPercent = "compiled_speedup_percent"
+    case outputsMatchExactly = "outputs_match_exactly"
+  }
+}
+
 private struct PromptCacheComparison: Encodable {
   var trialsPerMode: Int
   var cachedMedianTimeToFirstTokenMilliseconds: Double
@@ -168,6 +186,7 @@ private struct GenerationMode {
   var useLagunaFusion: Bool
   var useCompiledAttentionGate: Bool
   var useCompiledBlockTail = false
+  var useCompiledAttentionPrelude = false
   var usePromptCache = true
 }
 
@@ -190,6 +209,7 @@ private struct RuntimeBenchmarkReport: Encodable {
   var lagunaFusionABComparison: LagunaFusionABComparison?
   var lagunaAttentionGateABComparison: LagunaAttentionGateABComparison?
   var lagunaBlockTailABComparison: LagunaBlockTailABComparison?
+  var lagunaAttentionPreludeABComparison: LagunaAttentionPreludeABComparison?
   var promptCacheComparison: PromptCacheComparison?
   var warmups: [RecordedTrial]
   var trials: [RecordedTrial]
@@ -210,6 +230,8 @@ private struct RuntimeBenchmarkReport: Encodable {
     case lagunaFusionABComparison = "laguna_fusion_ab_comparison"
     case lagunaAttentionGateABComparison = "laguna_attention_gate_ab_comparison"
     case lagunaBlockTailABComparison = "laguna_block_tail_ab_comparison"
+    case lagunaAttentionPreludeABComparison =
+      "laguna_attention_prelude_ab_comparison"
     case promptCacheComparison = "prompt_cache_comparison"
   }
 }
@@ -296,6 +318,20 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
   var lagunaBlockTailAB = false
 
   @Flag(
+    name: .customLong("laguna-attention-prelude-ab"),
+    help:
+      "Alternate eager and decode-only compiled Laguna attention preludes with the compiled block tail enabled; --trials is the count per mode."
+  )
+  var lagunaAttentionPreludeAB = false
+
+  @Flag(
+    name: .customLong("laguna-compiled-tail-only"),
+    help:
+      "Run only the compiled Laguna decoder block tail; intended for isolated profiling."
+  )
+  var lagunaCompiledTailOnly = false
+
+  @Flag(
     name: .customLong("prompt-cache"),
     help:
       "Measure a Laguna sibling branch restored from the completed-prefix LRU versus a forced-cold replay; reports TTFT and cache/prefill token counts, not decode speedup."
@@ -355,15 +391,24 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       throw ValidationError(
         "--laguna-block-tail-ab cannot be combined with --dflash-model.")
     }
+    if lagunaAttentionPreludeAB, dflashModel != nil {
+      throw ValidationError(
+        "--laguna-attention-prelude-ab cannot be combined with --dflash-model.")
+    }
+    if lagunaCompiledTailOnly, dflashModel != nil {
+      throw ValidationError(
+        "--laguna-compiled-tail-only cannot be combined with --dflash-model.")
+    }
     if promptCache, dflashModel != nil {
       throw ValidationError("--prompt-cache cannot be combined with --dflash-model.")
     }
     let exclusiveModes = [
-      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB, promptCache,
+      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB,
+      lagunaAttentionPreludeAB, lagunaCompiledTailOnly, promptCache,
     ].filter { $0 }.count
     if exclusiveModes > 1 {
       throw ValidationError(
-        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, and --prompt-cache are mutually exclusive."
+        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, --laguna-attention-prelude-ab, --laguna-compiled-tail-only, and --prompt-cache are mutually exclusive."
       )
     }
   }
@@ -402,10 +447,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     var measuredRecords = [RecordedTrial]()
     var sequence = 0
     let ordinaryMode = GenerationMode(
-      label: dflashModel == nil ? "target_only" : "dflash",
+      label: lagunaCompiledTailOnly
+        ? "laguna_block_tail_compiled"
+        : (dflashModel == nil ? "target_only" : "dflash"),
       useDFlash: dflashModel != nil,
       useLagunaFusion: true,
-      useCompiledAttentionGate: true)
+      useCompiledAttentionGate: true,
+      useCompiledBlockTail: lagunaCompiledTailOnly)
     let targetOnlyMode = GenerationMode(
       label: "target_only", useDFlash: false, useLagunaFusion: true,
       useCompiledAttentionGate: true)
@@ -432,6 +480,14 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       label: "laguna_block_tail_compiled", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
       useCompiledBlockTail: true)
+    let attentionPreludeEagerMode = GenerationMode(
+      label: "laguna_attention_prelude_eager", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useCompiledAttentionPrelude: false)
+    let attentionPreludeCompiledMode = GenerationMode(
+      label: "laguna_attention_prelude_compiled", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useCompiledAttentionPrelude: true)
 
     if promptCache {
       for warmupIndex in 0..<warmups {
@@ -466,6 +522,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         warmupModes = [attentionGateEagerMode, attentionGateCompiledMode]
       } else if lagunaBlockTailAB {
         warmupModes = [blockTailEagerMode, blockTailCompiledMode]
+      } else if lagunaAttentionPreludeAB {
+        warmupModes = [attentionPreludeEagerMode, attentionPreludeCompiledMode]
       } else {
         warmupModes = [ordinaryMode]
       }
@@ -506,6 +564,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
             trialIndex.isMultiple(of: 2)
             ? [blockTailEagerMode, blockTailCompiledMode]
             : [blockTailCompiledMode, blockTailEagerMode]
+        } else if lagunaAttentionPreludeAB {
+          measuredModes =
+            trialIndex.isMultiple(of: 2)
+            ? [attentionPreludeEagerMode, attentionPreludeCompiledMode]
+            : [attentionPreludeCompiledMode, attentionPreludeEagerMode]
         } else {
           measuredModes = [ordinaryMode]
         }
@@ -542,6 +605,12 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     let blockTailCompiledRecords = measuredRecords.filter {
       $0.mode == "laguna_block_tail_compiled"
     }
+    let attentionPreludeEagerRecords = measuredRecords.filter {
+      $0.mode == "laguna_attention_prelude_eager"
+    }
+    let attentionPreludeCompiledRecords = measuredRecords.filter {
+      $0.mode == "laguna_attention_prelude_compiled"
+    }
     let promptCacheCachedRecords = measuredRecords.filter {
       $0.mode == "prompt_cache_cached"
     }
@@ -557,6 +626,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       primaryRecords = attentionGateCompiledRecords
     } else if lagunaBlockTailAB {
       primaryRecords = blockTailCompiledRecords
+    } else if lagunaAttentionPreludeAB {
+      primaryRecords = attentionPreludeCompiledRecords
     } else if promptCache {
       primaryRecords = []
     } else {
@@ -645,6 +716,27 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else {
       lagunaBlockTailComparison = nil
     }
+    let lagunaAttentionPreludeComparison: LagunaAttentionPreludeABComparison?
+    if lagunaAttentionPreludeAB {
+      let eagerMedian = median(
+        attentionPreludeEagerRecords.map(\.metrics.tokensPerSecond))
+      let compiledMedian = median(
+        attentionPreludeCompiledRecords.map(\.metrics.tokensPerSecond))
+      let referenceContent = attentionPreludeEagerRecords.first?.content
+      let outputsMatch =
+        referenceContent != nil
+        && attentionPreludeEagerRecords.allSatisfy { $0.content == referenceContent }
+        && attentionPreludeCompiledRecords.allSatisfy { $0.content == referenceContent }
+      lagunaAttentionPreludeComparison = LagunaAttentionPreludeABComparison(
+        trialsPerMode: trials,
+        eagerMedianDecodeTokensPerSecond: eagerMedian,
+        compiledMedianDecodeTokensPerSecond: compiledMedian,
+        compiledSpeedupPercent: 100 * (compiledMedian / eagerMedian - 1),
+        outputsMatchExactly: outputsMatch
+      )
+    } else {
+      lagunaAttentionPreludeComparison = nil
+    }
     let promptCacheModeComparison: PromptCacheComparison?
     if promptCache {
       let cachedTTFT = median(
@@ -694,6 +786,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       lagunaFusionABComparison: lagunaFusionComparison,
       lagunaAttentionGateABComparison: lagunaAttentionGateComparison,
       lagunaBlockTailABComparison: lagunaBlockTailComparison,
+      lagunaAttentionPreludeABComparison: lagunaAttentionPreludeComparison,
       promptCacheComparison: promptCacheModeComparison,
       warmups: warmupRecords,
       trials: measuredRecords
@@ -738,6 +831,18 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       print(
         String(
           format: "A/B median: eager block tail %.2f tok/s, compiled block tail %.2f tok/s (%+.2f%%)",
+          comparison.eagerMedianDecodeTokensPerSecond,
+          comparison.compiledMedianDecodeTokensPerSecond,
+          comparison.compiledSpeedupPercent
+        )
+      )
+      print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
+    } else if let comparison = lagunaAttentionPreludeComparison {
+      print(
+        String(
+          format:
+            "A/B median: eager attention prelude %.2f tok/s, "
+            + "compiled attention prelude %.2f tok/s (%+.2f%%)",
           comparison.eagerMedianDecodeTokensPerSecond,
           comparison.compiledMedianDecodeTokensPerSecond,
           comparison.compiledSpeedupPercent
@@ -791,14 +896,18 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         await LagunaRuntimeTuning.$useCompiledBlockTail.withValue(
           mode.useCompiledBlockTail
         ) {
-          await runner.stream(
-            messages: messages,
-            maximumTokens: tokens,
-            temperature: 0,
-            topP: 1,
-            enablePromptCache: mode.usePromptCache,
-            enableSpeculativeDecoding: mode.useDFlash
-          )
+          await LagunaRuntimeTuning.$useCompiledAttentionPrelude.withValue(
+            mode.useCompiledAttentionPrelude
+          ) {
+            await runner.stream(
+              messages: messages,
+              maximumTokens: tokens,
+              temperature: 0,
+              topP: 1,
+              enablePromptCache: mode.usePromptCache,
+              enableSpeculativeDecoding: mode.useDFlash
+            )
+          }
         }
       }
     }
