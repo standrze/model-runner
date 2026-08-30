@@ -42,9 +42,9 @@ model_runner_release_reject_multiline() {
 model_runner_release_paths() {
   local package_root="$1"
 
-  MODEL_RUNNER_RTX4090_STABLE_PATH="$package_root/bin/model-runner-rtx4090"
-  MODEL_RUNNER_RTX4090_MANIFEST_PATH="$package_root/bin/model-runner-rtx4090.manifest"
-  MODEL_RUNNER_RTX4090_COMPAT_PATH="$package_root/.build/release/model-runner"
+  MODEL_RUNNER_RTX4090_STABLE_PATH="$package_root/bin/midnight-rtx4090"
+  MODEL_RUNNER_RTX4090_MANIFEST_PATH="$package_root/bin/midnight-rtx4090.manifest"
+  MODEL_RUNNER_RTX4090_COMPAT_PATH="$package_root/.build/release/midnight"
 }
 
 model_runner_verify_rtx4090_manifest_and_binary() {
@@ -254,7 +254,7 @@ model_runner_publish_rtx4090_release() {
     fi
   fi
 
-  stable_temp="$(mktemp "$package_root/bin/.model-runner-rtx4090.XXXXXX")" || return 1
+  stable_temp="$(mktemp "$package_root/bin/.midnight-rtx4090.XXXXXX")" || return 1
   if ! install -m 0755 "$source_binary" "$stable_temp"; then
     rm -f "$stable_temp"
     return 1
@@ -273,7 +273,7 @@ model_runner_publish_rtx4090_release() {
     return 1
   fi
 
-  manifest_temp="$(mktemp "$package_root/bin/.model-runner-rtx4090.manifest.XXXXXX")" || {
+  manifest_temp="$(mktemp "$package_root/bin/.midnight-rtx4090.manifest.XXXXXX")" || {
     rm -f "$stable_temp"
     return 1
   }
@@ -298,7 +298,7 @@ model_runner_publish_rtx4090_release() {
   manifest_temp=""
   model_runner_verify_rtx4090_manifest_and_binary "$package_root" "$scratch_path" || return 1
 
-  link_temp="$(mktemp "$release_dir/.model-runner-link.XXXXXX")" || return 1
+  link_temp="$(mktemp "$release_dir/.midnight-link.XXXXXX")" || return 1
   rm -f "$link_temp"
   if ! ln -s "$MODEL_RUNNER_RTX4090_STABLE_PATH" "$link_temp"; then
     rm -f "$link_temp"

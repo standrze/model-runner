@@ -141,11 +141,11 @@ grep -Fq '// drift' "$PUBLISH_PACKAGE/include/cute/algorithm/runtime-extra.hpp"
 # without replacing or rewriting either existing release artifact.
 MIGRATION_PACKAGE="$TEST_ROOT/migration-package"
 mkdir -p "$MIGRATION_PACKAGE/bin"
-write_file "$MIGRATION_PACKAGE/bin/model-runner-rtx4090" '#!/usr/bin/env bash' 'exit 0'
-chmod 0755 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090"
-write_file "$MIGRATION_PACKAGE/bin/model-runner-rtx4090.manifest" 'existing=release-manifest'
-MIGRATION_BINARY_SHA="$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090")"
-MIGRATION_MANIFEST_SHA="$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090.manifest")"
+write_file "$MIGRATION_PACKAGE/bin/midnight-rtx4090" '#!/usr/bin/env bash' 'exit 0'
+chmod 0755 "$MIGRATION_PACKAGE/bin/midnight-rtx4090"
+write_file "$MIGRATION_PACKAGE/bin/midnight-rtx4090.manifest" 'existing=release-manifest'
+MIGRATION_BINARY_SHA="$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090")"
+MIGRATION_MANIFEST_SHA="$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090.manifest")"
 CUDNN_FRONTEND_ROOT="$CUDNN_ROOT" \
 CUTLASS_ROOT="$CUTLASS_ROOT_FIXTURE" \
 MLX_CUDA_HOST_CXX="$HOST_CXX" \
@@ -153,18 +153,18 @@ bash "$RUNTIME_SCRIPT" \
   --toolkit "$TOOLKIT" \
   --package-root "$MIGRATION_PACKAGE" \
   --publish-only
-[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090")" == "$MIGRATION_BINARY_SHA" ]]
-[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090.manifest")" == "$MIGRATION_MANIFEST_SHA" ]]
+[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090")" == "$MIGRATION_BINARY_SHA" ]]
+[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090.manifest")" == "$MIGRATION_MANIFEST_SHA" ]]
 model_runner_verify_cuda_runtime_headers "$MIGRATION_PACKAGE"
 model_runner_verify_cuda_runtime_headers_for_runner \
-  "$MIGRATION_PACKAGE" "$MIGRATION_PACKAGE/bin/model-runner-rtx4090"
+  "$MIGRATION_PACKAGE" "$MIGRATION_PACKAGE/bin/midnight-rtx4090"
 mkdir -p "$MIGRATION_PACKAGE/.build/release"
-ln -s "$MIGRATION_PACKAGE/bin/model-runner-rtx4090" \
-  "$MIGRATION_PACKAGE/.build/release/model-runner"
+ln -s "$MIGRATION_PACKAGE/bin/midnight-rtx4090" \
+  "$MIGRATION_PACKAGE/.build/release/midnight"
 model_runner_verify_cuda_runtime_headers_for_runner \
-  "$MIGRATION_PACKAGE" "$MIGRATION_PACKAGE/.build/release/model-runner"
+  "$MIGRATION_PACKAGE" "$MIGRATION_PACKAGE/.build/release/midnight"
 [[ "$MODEL_RUNNER_CUDA_RUNTIME_RUNNER_REALPATH" \
-  == "$MIGRATION_PACKAGE/bin/model-runner-rtx4090" ]]
+  == "$MIGRATION_PACKAGE/bin/midnight-rtx4090" ]]
 [[ "$MODEL_RUNNER_CUDA_RUNTIME_RUNNER_INCLUDE_DIR" \
   == "$MIGRATION_PACKAGE/include" ]]
 CUDNN_FRONTEND_ROOT="$CUDNN_ROOT" \
@@ -190,16 +190,16 @@ model_runner_verify_cuda_runtime_headers "$MIGRATION_PACKAGE"
 # derive a different MLX include root. They fail without receiving headers.
 ARBITRARY_ROOT="$TEST_ROOT/arbitrary-runner-root"
 mkdir -p "$ARBITRARY_ROOT/bin"
-write_file "$ARBITRARY_ROOT/bin/model-runner" '#!/usr/bin/env bash' 'exit 0'
-chmod 0755 "$ARBITRARY_ROOT/bin/model-runner"
+write_file "$ARBITRARY_ROOT/bin/midnight" '#!/usr/bin/env bash' 'exit 0'
+chmod 0755 "$ARBITRARY_ROOT/bin/midnight"
 if model_runner_resolve_cuda_runtime_runner_include \
-  "$MIGRATION_PACKAGE" "$ARBITRARY_ROOT/bin/model-runner" >/dev/null 2>&1; then
+  "$MIGRATION_PACKAGE" "$ARBITRARY_ROOT/bin/midnight" >/dev/null 2>&1; then
   echo "arbitrary external runner unexpectedly accepted managed package headers" >&2
   exit 1
 fi
 [[ ! -e "$ARBITRARY_ROOT/include" ]]
 
-SCRATCH_RUNNER="$MIGRATION_PACKAGE/.build/custom/x86_64-unknown-linux-gnu/release/model-runner"
+SCRATCH_RUNNER="$MIGRATION_PACKAGE/.build/custom/x86_64-unknown-linux-gnu/release/midnight"
 mkdir -p "$(dirname "$SCRATCH_RUNNER")"
 write_file "$SCRATCH_RUNNER" '#!/usr/bin/env bash' 'exit 0'
 chmod 0755 "$SCRATCH_RUNNER"
@@ -209,8 +209,8 @@ if model_runner_resolve_cuda_runtime_runner_include \
   exit 1
 fi
 [[ ! -e "$MIGRATION_PACKAGE/.build/custom/x86_64-unknown-linux-gnu/include" ]]
-[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090")" == "$MIGRATION_BINARY_SHA" ]]
-[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/model-runner-rtx4090.manifest")" == "$MIGRATION_MANIFEST_SHA" ]]
+[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090")" == "$MIGRATION_BINARY_SHA" ]]
+[[ "$(fixture_sha256 "$MIGRATION_PACKAGE/bin/midnight-rtx4090.manifest")" == "$MIGRATION_MANIFEST_SHA" ]]
 
 # The launcher passes its exact verified environment to an arbitrary command.
 CAPTURE_PACKAGE="$TEST_ROOT/capture-package"

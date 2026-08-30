@@ -35,10 +35,10 @@ import PackageDescription
 #endif
 
 let package = Package(
-    name: "ModelRunnerMLX",
+    name: "Midnight",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "model-runner", targets: ["ModelRunner"]),
+        .executable(name: "midnight", targets: ["Midnight"]),
         .executable(
             name: "model-runner-metal-quant-bench",
             targets: ["MetalQuantizationBenchmark"]
@@ -70,6 +70,10 @@ let package = Package(
         .executable(
             name: "model-runner-runtime-bench",
             targets: ["RuntimeBenchmark"]
+        ),
+        .executable(
+            name: "model-runner-quality-bench",
+            targets: ["ModelQualityBenchmark"]
         ),
     ],
     dependencies: [
@@ -115,7 +119,7 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "ModelRunner",
+            name: "Midnight",
             dependencies: [
                 "ModelRunnerCore",
                 "ModelRunnerProtocol",
@@ -124,6 +128,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
+            path: "Sources/ModelRunner",
             // The executable uses an @main AsyncParsableCommand and now has a
             // second source file for its POSIX signal relay.
             swiftSettings: [.unsafeFlags(["-parse-as-library"])]
@@ -207,12 +212,35 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
+        .target(
+            name: "ModelQualityCore"
+        ),
+        .executableTarget(
+            name: "ModelQualityBenchmark",
+            dependencies: [
+                "ModelQualityCore",
+                "ModelRunnerCore",
+                "ModelRunnerProtocol",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: backendSwiftSettings
+        ),
         .testTarget(
             name: "ModelRunnerProtocolTests",
             dependencies: [
                 "ModelRunnerCore",
                 "ModelRunnerProtocol",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
             ]
         ),
         .testTarget(
@@ -228,6 +256,10 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
             ]
+        ),
+        .testTarget(
+            name: "ModelQualityCoreTests",
+            dependencies: ["ModelQualityCore"]
         ),
     ],
     swiftLanguageModes: [.v6]

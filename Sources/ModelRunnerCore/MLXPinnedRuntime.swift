@@ -108,7 +108,7 @@
     }
 
     init() {
-      thread.name = "model-runner.mlx-pinned"
+      thread.name = "midnight.mlx-pinned"
       thread.qualityOfService = .userInitiated
 
       condition.lock()

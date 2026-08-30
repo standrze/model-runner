@@ -44,7 +44,7 @@ private struct SourceDescriptor: Decodable {
 private struct QuantizerProvenance: Encodable {
   var format = 1
   var status: String
-  var algorithm = "q4r8_affine_scale_search_ls2"
+  var algorithm: String
   var createdAt: String
   var sourceModel: String
   var modelType: String
@@ -236,6 +236,13 @@ private struct ModelQuantizer: AsyncParsableCommand {
   )
   var maximumShardGiB = 5.0
 
+  @Flag(
+    name: .customLong("standard-q4"),
+    help:
+      "Use ordinary MLX affine Q4 group-64 calibration for eligible matrices as a matched ScaleSearch control."
+  )
+  var standardQ4 = false
+
   @Option(
     name: .customLong("expert-batch"),
     help: "Laguna --template expert batch size."
@@ -277,6 +284,11 @@ private struct ModelQuantizer: AsyncParsableCommand {
       guard !overwrite else {
         throw ValidationError(
           "--overwrite is not supported with --template; choose a new destination."
+        )
+      }
+      guard !standardQ4 else {
+        throw ValidationError(
+          "--standard-q4 is a generic-conversion control; Laguna --template retains its exact searched-Q4 layout."
         )
       }
     }
@@ -375,7 +387,7 @@ private struct ModelQuantizer: AsyncParsableCommand {
       bits: 4,
       groupSize: 64,
       mode: .affine,
-      calibration: .q4AffineScaleSearch,
+      calibration: standardQ4 ? .standard : .q4AffineScaleSearch,
       maxShardSize: Int64(maximumShardGiB * 1_024 * 1_024 * 1_024),
       overwriteExistingOutput: overwrite,
       quantizationPredicate: { path, _ in
@@ -446,7 +458,7 @@ private struct ModelQuantizer: AsyncParsableCommand {
       bits: 4,
       groupSize: 64,
       mode: .affine,
-      calibration: .q4AffineScaleSearch,
+      calibration: standardQ4 ? .standard : .q4AffineScaleSearch,
       maxShardSize: Int64(maximumShardGiB * 1_024 * 1_024 * 1_024),
       overwriteExistingOutput: overwrite,
       quantizationPredicate: { path, _ in
@@ -574,7 +586,8 @@ private struct ModelQuantizer: AsyncParsableCommand {
     }
     guard !scaleSearchPaths.isEmpty else {
       throw QuantizerError.invalidPolicy(
-        "model exposes no group-64 Linear or SwitchLinear matrices for ScaleSearch"
+        "model exposes no group-64 Linear or SwitchLinear matrices for "
+          + (standardQ4 ? "standard Q4" : "ScaleSearch")
       )
     }
 
@@ -657,9 +670,17 @@ private struct ModelQuantizer: AsyncParsableCommand {
     print("Model type: \(plan.modelType)")
     print("Profile: \(plan.profile.name)")
     print("Device: \(device)")
-    print("Policy: affine group-64 Q4 ScaleSearch with standard affine Q8 overrides")
+    if standardQ4 {
+      print("Policy: standard affine group-64 Q4 with standard affine Q8 overrides")
+    } else {
+      print("Policy: affine group-64 Q4 ScaleSearch with standard affine Q8 overrides")
+    }
     print("Quantizable modules: \(plan.quantizablePaths.count)")
-    print("  Q4 ScaleSearch Linear/SwitchLinear: \(plan.scaleSearchPaths.count)")
+    if standardQ4 {
+      print("  standard Q4 Linear/SwitchLinear: \(plan.scaleSearchPaths.count)")
+    } else {
+      print("  Q4 ScaleSearch Linear/SwitchLinear: \(plan.scaleSearchPaths.count)")
+    }
     print("  standard Q4 embedding/custom modules: \(plan.standardQ4Paths.count)")
     print("  standard Q8 modules: \(plan.q8Paths.count)")
     print("  skipped modules: \(plan.skippedPaths.count)")
@@ -683,17 +704,27 @@ private struct ModelQuantizer: AsyncParsableCommand {
     result: ModelConversionResult,
     sourceURL: URL
   ) throws {
+    let isDFlash = plan.profile.name == ArchitectureProfile.lagunaDFlash.name
+    let standardQ4Paths =
+      standardQ4
+      ? plan.scaleSearchPaths.union(plan.standardQ4Paths).sorted()
+      : plan.standardQ4Paths.sorted()
     let provenance = QuantizerProvenance(
       status:
-        plan.profile.name == ArchitectureProfile.lagunaDFlash.name
-        ? "experimental_unbenchmarked_dflash_candidate"
-        : "experimental_measured_calibration",
+        standardQ4
+        ? (isDFlash
+          ? "experimental_unbenchmarked_dflash_standard_q4_control"
+          : "experimental_unbenchmarked_standard_q4_control")
+        : (isDFlash
+          ? "experimental_unbenchmarked_dflash_candidate"
+          : "experimental_measured_calibration"),
+      algorithm: standardQ4 ? "mlx_affine_q4_standard" : "q4r8_affine_scale_search_ls2",
       createdAt: ISO8601DateFormatter().string(from: Date()),
       sourceModel: sourceURL.path,
       modelType: plan.modelType,
       architectureProfile: plan.profile.name,
-      q4ScaleSearchModules: plan.scaleSearchPaths.sorted(),
-      standardQ4Modules: plan.standardQ4Paths.sorted(),
+      q4ScaleSearchModules: standardQ4 ? [] : plan.scaleSearchPaths.sorted(),
+      standardQ4Modules: standardQ4Paths,
       q8Modules: plan.q8Paths.sorted(),
       mandatoryQ8Modules: plan.mandatoryQ8Paths.sorted(),
       skippedModules: plan.skippedPaths.sorted(),
@@ -703,7 +734,9 @@ private struct ModelQuantizer: AsyncParsableCommand {
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     try encoder.encode(provenance).write(
       to: result.outputDirectory.appendingPathComponent(
-        "scale-search-quantization.json"),
+        standardQ4
+          ? "standard-q4-quantization.json"
+          : "scale-search-quantization.json"),
       options: .atomic
     )
   }

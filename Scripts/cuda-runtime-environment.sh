@@ -344,7 +344,7 @@ model_runner_resolve_cuda_runtime_runner_include() {
     echo "Runner:   $runner_realpath" >&2
     echo "Expected: $managed_include" >&2
     echo "Resolved: $runner_include" >&2
-    echo "Use the verified package bin/model-runner-rtx4090 publication or a link resolving to it." >&2
+    echo "Use the verified package bin/midnight-rtx4090 publication or a link resolving to it." >&2
     return 1
   fi
 

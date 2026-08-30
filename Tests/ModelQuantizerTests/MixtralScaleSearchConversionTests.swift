@@ -13,6 +13,7 @@ final class MixtralScaleSearchConversionTests: XCTestCase {
         "model-runner-mixtral-conversion-\(UUID().uuidString)")
       let source = root.appendingPathComponent("source")
       let output = root.appendingPathComponent("output")
+      let standardOutput = root.appendingPathComponent("standard-output")
       try fileManager.createDirectory(at: source, withIntermediateDirectories: true)
       defer { try? fileManager.removeItem(at: root) }
 
@@ -70,6 +71,23 @@ final class MixtralScaleSearchConversionTests: XCTestCase {
           }
         )
       )
+      let standardResult = try await LLMModelFactory.shared.convert(
+        from: source,
+        to: standardOutput,
+        options: ModelConversionOptions(
+          bits: 4,
+          groupSize: 64,
+          mode: .affine,
+          calibration: .standard,
+          maxShardSize: 16 * 1_024 * 1_024,
+          quantizationPredicate: { path, _ in
+            if path.hasSuffix(".block_sparse_moe.gate") {
+              return .quantize(routerQ8)
+            }
+            return .quantize()
+          }
+        )
+      )
 
       XCTAssertFalse(result.weightsURLs.isEmpty)
       let outputConfig = try JSONDecoder.json5().decode(
@@ -105,6 +123,21 @@ final class MixtralScaleSearchConversionTests: XCTestCase {
         outputArrays["model.layers.0.block_sparse_moe.switch_mlp.up_proj.biases"])
       XCTAssertNotNil(
         outputArrays["model.layers.0.block_sparse_moe.switch_mlp.down_proj.weight"])
+
+      var standardArrays = [String: MLXArray]()
+      for weightsURL in standardResult.weightsURLs {
+        standardArrays.merge(
+          try loadArrays(url: weightsURL, stream: .cpu),
+          uniquingKeysWith: { _, replacement in replacement }
+        )
+      }
+      XCTAssertEqual(Set(outputArrays.keys), Set(standardArrays.keys))
+      for (key, scaleSearchArray) in outputArrays {
+        let standardArray = try XCTUnwrap(
+          standardArrays[key], "missing standard control array \(key)")
+        XCTAssertEqual(scaleSearchArray.shape, standardArray.shape, key)
+        XCTAssertEqual(scaleSearchArray.dtype, standardArray.dtype, key)
+      }
     }
   }
 }

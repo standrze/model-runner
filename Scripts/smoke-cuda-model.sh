@@ -15,7 +15,7 @@ Usage:
 
 Options:
   --profile qwen|gemma   Bounded resource profile (default: qwen)
-  --runner PATH          Existing model-runner binary; otherwise use SwiftPM bin path
+  --runner PATH          Existing midnight binary; otherwise use SwiftPM bin path
   --help                 Show this help
 
 The model path and served name are always required explicitly. Resource ceilings
@@ -148,10 +148,10 @@ else
       swift build --configuration release \
         "${MODEL_RUNNER_SWIFT_BUILD_SCRATCH_ARGS[@]}" --show-bin-path
     )"
-    RUNNER_PATH="$BIN_DIR/model-runner"
+    RUNNER_PATH="$BIN_DIR/midnight"
   fi
   if [[ ! -x "$RUNNER_PATH" ]]; then
-    echo "model-runner is not built at $RUNNER_PATH; build it before the smoke test." >&2
+    echo "Midnight Runner is not built at $RUNNER_PATH; build it before the smoke test." >&2
     exit 1
   fi
 fi
@@ -170,7 +170,7 @@ OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd -P)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 RESULT_DIR="$OUTPUT_ROOT/$RUN_ID"
 mkdir -p "$RESULT_DIR"
-UNIT_NAME="model-runner-smoke-${UID}-$$-${RANDOM}.service"
+UNIT_NAME="midnight-smoke-${UID}-$$-${RANDOM}.service"
 UNIT_STARTED=0
 SAMPLER_PID=0
 
@@ -338,7 +338,7 @@ if systemd-run --user \
     --collect \
     --quiet \
     --working-directory="$PACKAGE_ROOT" \
-    --property="Description=Bounded model-runner CUDA smoke $RUN_ID" \
+    --property="Description=Bounded Midnight Runner CUDA smoke $RUN_ID" \
     --property=MemoryAccounting=yes \
     --property="MemoryHigh=${MODEL_RUNNER_SMOKE_HOST_MEMORY_HIGH_GIB}G" \
     --property="MemoryMax=${MODEL_RUNNER_SMOKE_HOST_MEMORY_MAX_GIB}G" \

@@ -115,4 +115,5 @@ same-prompt deployment comparison, not yet a teacher-forced same-token-path
 kernel comparison.
 
 The compatibility and audit utilities used for this local experiment are in
-`tmp/build_ollama_q4r8_compat.py` and `tmp/audit_ollama_q4r8_compat.py`.
+`Scripts/build-ollama-q4r8-compat.py` and
+`Scripts/audit-ollama-q4r8-compat.py`.

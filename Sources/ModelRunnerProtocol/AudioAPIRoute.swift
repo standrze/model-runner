@@ -7,7 +7,7 @@ public enum AudioAPIRoute: Equatable, Sendable {
     case voiceSample(id: String)
 
     public static func parse(uri: String) -> AudioAPIRoute? {
-        guard let components = URLComponents(string: "http://model-runner.local\(uri)"),
+        guard let components = URLComponents(string: "http://midnight.local\(uri)"),
             let segments = decodedPathSegments(components.percentEncodedPath)
         else { return nil }
 
@@ -43,7 +43,7 @@ public enum AudioAPIRoute: Equatable, Sendable {
     }
 
     public static func queryItems(uri: String) -> [URLQueryItem] {
-        URLComponents(string: "http://model-runner.local\(uri)")?.queryItems ?? []
+        URLComponents(string: "http://midnight.local\(uri)")?.queryItems ?? []
     }
 
     private static func decodedPathSegments(_ encodedPath: String) -> [String]? {

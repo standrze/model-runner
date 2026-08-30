@@ -213,11 +213,13 @@ public actor LocalModelRunner {
   public nonisolated let engine: ModelEngine
   public nonisolated let dflashModelPath: String?
   public nonisolated let dflashBlockSize: Int?
+  public nonisolated let supportsMistralHotConversationCache: Bool
 
   private let container: ModelContainer
   private let tokenLimit: GenerationTokenLimit
   private let device: Device
   private let normalizesGemma4Prompt: Bool
+  private let runtimeCapabilities: ModelRuntimeCapabilities
   private let supportsLagunaPromptCache: Bool
   private let dflash: LoadedDFlash?
   private var wiredMemoryPlan: MLXWiredMemoryPlan?
@@ -253,6 +255,7 @@ public actor LocalModelRunner {
       .resolvingSymlinksInPath()
     try Self.validateModelFolder(modelURL)
     let normalizesGemma4Prompt = try Self.isGemma4Model(modelURL)
+    let runtimeCapabilities = try ModelRuntimeCapabilities.load(from: modelURL)
 
     let dflashURL: URL? = try dflashModelPath.map { path in
       let expanded = NSString(string: path).expandingTildeInPath
@@ -451,6 +454,9 @@ public actor LocalModelRunner {
     self.tokenLimit = tokenLimit
     self.device = device
     self.normalizesGemma4Prompt = normalizesGemma4Prompt
+    self.runtimeCapabilities = runtimeCapabilities
+    self.supportsMistralHotConversationCache =
+      runtimeCapabilities.supportsMistralConversationPrefixCache
     self.supportsLagunaPromptCache = supportsLagunaPromptCache
     self.wiredMemoryPlan = wiredMemoryPlan
     let prefixCacheLimits = ConversationPrefixCacheLimits.resolve(environment: environment)
@@ -468,6 +474,11 @@ public actor LocalModelRunner {
       print(
         "Conversation prefix cache: entries=\(prefixCacheLimits.maximumEntries) "
           + "memory=\(prefixCacheLimits.maximumBytes) bytes"
+      )
+    } else if let family = runtimeCapabilities.mistralFamily {
+      print(
+        "Mistral hot conversation cache (\(family.rawValue)): "
+          + "zero-copy linear reuse enabled; branch snapshots disabled"
       )
     }
     if let loadedDFlash {
@@ -631,6 +642,22 @@ public actor LocalModelRunner {
       )
       return
     }
+    if Self.shouldUseMistralPromptCache(
+      capabilities: runtimeCapabilities,
+      enablePromptCache: enablePromptCache,
+      normalizesGemma4Prompt: normalizesGemma4Prompt,
+      hasCustomStopStrings: !stop.isEmpty,
+      usesDFlash: usesDFlash
+    ) {
+      try await generateWithMistralPromptCache(
+        messages: messages,
+        settings: settings,
+        tools: tools,
+        allowsReuse: enablePromptCache,
+        onEvent: onEvent
+      )
+      return
+    }
 
     // The one-shot paths can mutate cache state independently (custom stop
     // strings, Gemma prompt normalization, or Laguna's custom DFlash iterator).
@@ -656,6 +683,20 @@ public actor LocalModelRunner {
   /// extension of the transcript committed after the previous successful turn.
   /// Keeping this planner pure makes edited/branched conversation behavior
   /// independently testable without loading a model.
+  static func shouldUseMistralPromptCache(
+    capabilities: ModelRuntimeCapabilities,
+    enablePromptCache: Bool,
+    normalizesGemma4Prompt: Bool,
+    hasCustomStopStrings: Bool,
+    usesDFlash: Bool
+  ) -> Bool {
+    enablePromptCache
+      && capabilities.supportsMistralConversationPrefixCache
+      && !normalizesGemma4Prompt
+      && !hasCustomStopStrings
+      && !usesDFlash
+  }
+
   static func cachedConversationSuffixStart(
     committed: [OpenAIMessage],
     incoming: [OpenAIMessage]
@@ -690,6 +731,41 @@ public actor LocalModelRunner {
     allowsReuse: Bool,
     onEvent: @Sendable (LocalModelRunnerEvent) throws -> Void
   ) async throws {
+    try await generateWithConversationPrefixCache(
+      messages: messages,
+      settings: settings,
+      tools: tools,
+      allowsReuse: allowsReuse,
+      retainsBranchSnapshots: true,
+      onEvent: onEvent
+    )
+  }
+
+  private func generateWithMistralPromptCache(
+    messages: [OpenAIMessage],
+    settings: GenerationRequestSettings,
+    tools: [OpenAIToolDefinition]?,
+    allowsReuse: Bool,
+    onEvent: @Sendable (LocalModelRunnerEvent) throws -> Void
+  ) async throws {
+    try await generateWithConversationPrefixCache(
+      messages: messages,
+      settings: settings,
+      tools: tools,
+      allowsReuse: allowsReuse,
+      retainsBranchSnapshots: false,
+      onEvent: onEvent
+    )
+  }
+
+  private func generateWithConversationPrefixCache(
+    messages: [OpenAIMessage],
+    settings: GenerationRequestSettings,
+    tools: [OpenAIToolDefinition]?,
+    allowsReuse: Bool,
+    retainsBranchSnapshots: Bool,
+    onEvent: @Sendable (LocalModelRunnerEvent) throws -> Void
+  ) async throws {
     guard let final = messages.last, final.role == "user" || final.role == "tool" else {
       throw LocalModelRunnerError.lastMessageMustBeUserOrTool
     }
@@ -712,7 +788,9 @@ public actor LocalModelRunner {
         tools: toolSpecs
       )
       reusedHotConversation = true
-    } else if allowsReuse, let cached = conversationCache.longestPrefix(of: messages) {
+    } else if allowsReuse, retainsBranchSnapshots,
+      let cached = conversationCache.longestPrefix(of: messages)
+    {
       session = ChatSessionReference(
         cached.value.restore(
           container: container,
@@ -797,6 +875,11 @@ public actor LocalModelRunner {
       session: session,
       committedMessages: messages + [assistant]
     )
+    // A snapshot deep-copies and evaluates every KV array. Keep Laguna's
+    // established branchable LRU unchanged, but make the Mistral-family fast
+    // path zero-copy: the hot session handles the common append-only chat case
+    // without adding a potentially GiB-scale copy after each response.
+    guard retainsBranchSnapshots else { return }
     let snapshot = try await session.snapshot()
     conversationCache.insert(
       snapshot,
@@ -1197,7 +1280,7 @@ public enum LocalModelRunnerError: LocalizedError, Equatable {
 
   public var errorDescription: String? {
     switch self {
-    case .busy: "The model runner is already generating a response."
+    case .busy: "Midnight Runner is already generating a response."
     case .emptyResponse: "The model ended the turn without producing text."
     case .lastMessageMustBeUserOrTool:
       "The final chat message must have role 'user' or 'tool'."

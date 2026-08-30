@@ -1,4 +1,4 @@
-# MacBook MLX performance: Swift Model Runner versus Ollama
+# MacBook MLX performance: Midnight Runner versus Ollama
 
 Last updated: 2026-08-29
 
@@ -43,7 +43,7 @@ must therefore be treated as thermally and residency sensitive.
 
 ## What the two runtimes actually execute
 
-| Component | Swift Model Runner | Ollama 0.33.1 Laguna runner |
+| Component | Midnight Runner | Ollama 0.33.1 Laguna runner |
 | --- | --- | --- |
 | Host implementation | Swift | Go |
 | Mac compute backend | MLX + Metal | MLX + Metal |
@@ -284,10 +284,16 @@ makes no Mistral tok/s claim. The source audit still identifies concrete work:
 
 - classic Mistral is currently routed through the upstream Swift `LlamaModel`;
 - Mistral 3 uses the upstream `Mistral3TextModel`;
+- the local pinned Swift patch restores classic Mistral's checkpoint-declared
+  all-sliding or heterogeneous full/sliding cache layout;
+- all three Mistral text families use a zero-copy hot conversation session,
+  without Mistral branch snapshots or changes to Laguna's branchable LRU;
 - both issue separate gate and up projections and separate Q, K, and V
   projections;
-- Mixtral uses a `SwitchGLU` expert path plus an eager top-k router and a
-  separately compiled weighted reduction.
+- Mixtral uses a `SwitchGLU` expert path plus a pinned single-row Metal
+  top-k/gather router in GPU evaluation mode; CPU, training, and multi-token
+  prefill keep the eager path. Its weighted reduction remains a
+  separate compiled operation.
 
 The implementation order should be:
 
@@ -296,7 +302,9 @@ The implementation order should be:
 2. Establish native Swift and Ollama controls. Record whether Ollama used MLX
    or llama.cpp; a backend mismatch is a best-package comparison, not an
    orchestration comparison.
-3. Keep the current Mistral graph. The checked-in A/B was rerun on MLX 0.32.2:
+3. Keep the current projection graph, but retain the implemented
+   architecture-metadata and hot-session optimizations. The checked-in graph
+   A/B was rerun on MLX 0.32.2:
    compiled-only SwiGLU reached 0.983x current throughput, packed gate/up
    reached 0.722x, and packed QKV reached 0.955x end-to-end. All outputs matched,
    but none clears the performance gate.
@@ -304,7 +312,8 @@ The implementation order should be:
    only the winning layout. Preserve independently quantized rows exactly by
    concatenating packed rows, scales, and biases; do not requantize merely to
    fuse execution.
-5. Apply the proven compiled-router/reduction pattern to Mixtral, with its
+5. Retain the implemented Mixtral decode-router specialization and benchmark
+   whether further router/reduction fusion clears the end-to-end gate, with
    selected-logit softmax semantics preserved exactly.
 6. Benchmark a real Mistral checkpoint before model-specific tuning. The newer
    GQA attention and wide-GEMV work is present now, but shape probes cannot

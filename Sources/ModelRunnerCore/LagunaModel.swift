@@ -13,7 +13,7 @@ import MLXNN
 // architecture without carrying a private fork of mlx-swift-lm.
 
 /// Task-scoped Laguna execution controls used by the native benchmark harness.
-/// Child generation tasks inherit the value, while ordinary model-runner calls
+/// Child generation tasks inherit the value, while ordinary midnight calls
 /// use the optimized path by default.
 public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true

@@ -2,8 +2,8 @@ import Foundation
 import MLX
 import ModelRunnerProtocol
 
-enum MLXResourceGuard {
-  static func apply(_ limits: MLXResourceLimits) throws {
+public enum MLXResourceGuard {
+  public static func apply(_ limits: MLXResourceLimits) throws {
     Memory.memoryLimit = limits.memoryLimitBytes
     Memory.cacheLimit = limits.cacheLimitBytes
     Memory.clearCache()

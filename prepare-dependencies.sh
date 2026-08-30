@@ -14,11 +14,13 @@ MLX_SWIFT_CROSS_THREAD_STREAM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-cross-threa
 MLX_SWIFT_CLEAR_STREAMS_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-clear-streams.patch"
 MLX_SWIFT_EXISTING_DEFAULT_STREAM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-existing-default-stream.patch"
 MLX_SWIFT_DIRECT_SLICE_UPDATE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-direct-slice-update.patch"
+MLX_SWIFT_AFFINE_Q4_QMV_JIT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-affine-q4-qmv-jit.patch"
 MLX_SWIFT_DARWIN_EXPECTED_REVISION="72f3c3ad8aeee39bfc94f8fbeb446cac89e3a798"
 MLX_SWIFT_LINUX_EXPECTED_REVISION="2d2724006b62855c6c2a71df633baf4ee4ad8a0f"
 MLX_SOURCE_CHECKOUT="$MLX_SWIFT_CHECKOUT/Source/Cmlx/mlx"
 MLX_SOURCE_PATCH="$PACKAGE_ROOT/Patches/mlx-cuda-half-fmod.patch"
 MLX_SOURCE_GLOBAL_STREAM_CLEANUP_PATCH="$PACKAGE_ROOT/Patches/mlx-global-stream-cleanup.patch"
+MLX_SOURCE_AFFINE_Q4_QMV_PATCH="$PACKAGE_ROOT/Patches/mlx-affine-q4-qmv-specialization.patch"
 MLX_SOURCE_DARWIN_EXPECTED_REVISION="1f8e74e3f12f31365464a6867c6579f0e9b29d85"
 MLX_SOURCE_LINUX_EXPECTED_REVISION="7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247"
 MLX_C_SOURCE_CHECKOUT="$MLX_SWIFT_CHECKOUT/Source/Cmlx/mlx-c"
@@ -48,6 +50,8 @@ MLX_SWIFT_LM_Q4_AFFINE_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4
 MLX_SWIFT_LM_Q4_AFFINE_CENTERED_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-centered-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_BIAS_REFINEMENT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-bias-refinement.patch"
 MLX_SWIFT_LM_Q4_AFFINE_JOINT_FIT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-joint-fit.patch"
+MLX_SWIFT_LM_MISTRAL_HYBRID_ATTENTION_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mistral-hybrid-attention.patch"
+MLX_SWIFT_LM_MIXTRAL_FUSED_ROUTER_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mixtral-fused-router.patch"
 MLX_SWIFT_LM_EXPECTED_REVISION="14414441fa44f45eee35a61e9fa0bab577cf9734"
 
 case "$HOST_OS" in
@@ -251,6 +255,17 @@ if [[ "$APPLY_LINUX_DEPENDENCY_PATCHES" == "1" ]]; then
     "$MLX_C_SOURCE_CLEAR_GLOBAL_STREAMS_PATCH"
 fi
 
+if [[ "$HOST_OS" == "Darwin" ]]; then
+  apply_dependency_patch \
+    "mlx affine Q4 QMV specialization" \
+    "$MLX_SOURCE_CHECKOUT" \
+    "$MLX_SOURCE_AFFINE_Q4_QMV_PATCH"
+  apply_dependency_patch \
+    "mlx-swift affine Q4 QMV generated JIT" \
+    "$MLX_SWIFT_CHECKOUT" \
+    "$MLX_SWIFT_AFFINE_Q4_QMV_JIT_PATCH"
+fi
+
 apply_dependency_patch \
   "mlx-swift existing default stream API" \
   "$MLX_SWIFT_CHECKOUT" \
@@ -274,6 +289,14 @@ apply_dependency_patch \
   "mlx-swift-lm Gemma 4 LoRA layer coverage" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_GEMMA4_LORA_PATCH"
 apply_dependency_patch \
   "mlx-swift-lm Gemma 4 non-rotating cache" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_GEMMA4_CACHE_PATCH"
+apply_dependency_patch \
+  "mlx-swift-lm Mistral hybrid attention" \
+  "$MLX_SWIFT_LM_CHECKOUT" \
+  "$MLX_SWIFT_LM_MISTRAL_HYBRID_ATTENTION_PATCH"
+apply_dependency_patch \
+  "mlx-swift-lm Mixtral fused decode router" \
+  "$MLX_SWIFT_LM_CHECKOUT" \
+  "$MLX_SWIFT_LM_MIXTRAL_FUSED_ROUTER_PATCH"
 apply_dependency_patch \
   "mlx-swift-lm backend-aware token evaluation" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_BACKEND_TOKEN_EVAL_PATCH"
 apply_dependency_patch \

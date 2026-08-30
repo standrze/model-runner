@@ -13,11 +13,11 @@ case "$MODE" in
   run|debug|verify)
     ;;
   logs|telemetry)
-    echo "model-runner writes runtime logs and telemetry to its standard output." >&2
+    echo "Midnight Runner writes runtime logs and telemetry to its standard output." >&2
     exit 0
     ;;
   *)
-    echo "usage: $0 [run|debug|verify|logs|telemetry] [model-runner arguments...]" >&2
+    echo "usage: $0 [run|debug|verify|logs|telemetry] [midnight arguments...]" >&2
     exit 64
     ;;
 esac
@@ -28,9 +28,9 @@ if [[ "$MODE" == "debug" ]]; then
 fi
 
 MODEL_RUNNER_BUILD_CONFIGURATION="$CONFIGURATION" \
-MODEL_RUNNER_BUILD_PRODUCT=model-runner \
+MODEL_RUNNER_BUILD_PRODUCT=midnight \
   "$PACKAGE_ROOT/build.sh"
-BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path)/model-runner"
+BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path)/midnight"
 
 if [[ "$#" -eq 0 ]]; then
   set -- --list-models

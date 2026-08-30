@@ -121,7 +121,7 @@ exit 1
 MOCK
 cat > "$MOCK_BIN/pgrep" <<'MOCK'
 #!/usr/bin/env bash
-if [[ "$*" != "-x model-runner" ]]; then
+if [[ "$*" != "-x midnight" ]]; then
   exit 2
 fi
 if [[ -n "${MOCK_RUNNER_PIDS:-}" ]]; then
@@ -352,7 +352,7 @@ fi
 HARNESS="$PACKAGE_ROOT/Scripts/smoke-cuda-model.sh"
 HOST_GUARD="$PACKAGE_ROOT/Scripts/cuda-smoke-host-guard.sh"
 grep -Fq 'Both --model and --name are required' "$HARNESS"
-grep -Fq 'pgrep -x model-runner' "$HOST_GUARD"
+grep -Fq 'pgrep -x midnight' "$HOST_GUARD"
 grep -Fq -- '--query-compute-apps=pid,process_name,used_gpu_memory' "$HOST_GUARD"
 grep -Fq -- '--query-gpu=memory.free' "$HOST_GUARD"
 grep -Fq 'plus a 2 GiB reserve' "$HOST_GUARD"

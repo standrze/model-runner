@@ -144,6 +144,43 @@ private struct PromptCacheComparison: Encodable {
   }
 }
 
+private struct MistralHotCacheABComparison: Encodable {
+  var trialsPerMode: Int
+  var cachedMedianTimeToFirstTokenMilliseconds: Double
+  var coldMedianTimeToFirstTokenMilliseconds: Double
+  var cachedTTFTReductionPercent: Double
+  var cachedMedianTotalPromptTokenCount: Double
+  var cachedMedianPrefilledPromptTokenCount: Double
+  var cachedMedianReusedPromptTokenCount: Double
+  var coldMedianTotalPromptTokenCount: Double
+  var coldMedianPrefilledPromptTokenCount: Double
+  var coldMedianReusedPromptTokenCount: Double
+  var outputsMatchExactly: Bool
+  var firstOutputDivergenceUTF8Offset: Int?
+
+  enum CodingKeys: String, CodingKey {
+    case trialsPerMode = "trials_per_mode"
+    case cachedMedianTimeToFirstTokenMilliseconds =
+      "cached_median_time_to_first_token_milliseconds"
+    case coldMedianTimeToFirstTokenMilliseconds =
+      "cold_median_time_to_first_token_milliseconds"
+    case cachedTTFTReductionPercent = "cached_ttft_reduction_percent"
+    case cachedMedianTotalPromptTokenCount =
+      "cached_median_total_prompt_token_count"
+    case cachedMedianPrefilledPromptTokenCount =
+      "cached_median_prefilled_prompt_token_count"
+    case cachedMedianReusedPromptTokenCount =
+      "cached_median_reused_prompt_token_count"
+    case coldMedianTotalPromptTokenCount = "cold_median_total_prompt_token_count"
+    case coldMedianPrefilledPromptTokenCount =
+      "cold_median_prefilled_prompt_token_count"
+    case coldMedianReusedPromptTokenCount =
+      "cold_median_reused_prompt_token_count"
+    case outputsMatchExactly = "outputs_match_exactly"
+    case firstOutputDivergenceUTF8Offset = "first_output_divergence_utf8_offset"
+  }
+}
+
 private struct GenerationMode {
   var label: String
   var useDFlash: Bool
@@ -162,6 +199,8 @@ private struct RuntimeBenchmarkReport: Encodable {
   var dflashBlockSize: Int?
   var engine: String
   var prompt: String
+  var continuationPrompt: String
+  var allowEarlyStop: Bool
   var requestedTokens: Int
   var warmupCount: Int
   var measuredTrials: Int
@@ -171,6 +210,7 @@ private struct RuntimeBenchmarkReport: Encodable {
   var lagunaFusionABComparison: LagunaFusionABComparison?
   var lagunaAttentionGateABComparison: LagunaAttentionGateABComparison?
   var promptCacheComparison: PromptCacheComparison?
+  var mistralHotCacheABComparison: MistralHotCacheABComparison?
   var warmups: [RecordedTrial]
   var trials: [RecordedTrial]
 
@@ -181,6 +221,8 @@ private struct RuntimeBenchmarkReport: Encodable {
     case servedModelName = "served_model_name"
     case dflashModelPath = "dflash_model_path"
     case dflashBlockSize = "dflash_block_size"
+    case continuationPrompt = "continuation_prompt"
+    case allowEarlyStop = "allow_early_stop"
     case requestedTokens = "requested_tokens"
     case warmupCount = "warmup_count"
     case measuredTrials = "measured_trials"
@@ -190,6 +232,7 @@ private struct RuntimeBenchmarkReport: Encodable {
     case lagunaFusionABComparison = "laguna_fusion_ab_comparison"
     case lagunaAttentionGateABComparison = "laguna_attention_gate_ab_comparison"
     case promptCacheComparison = "prompt_cache_comparison"
+    case mistralHotCacheABComparison = "mistral_hot_cache_ab_comparison"
   }
 }
 
@@ -201,6 +244,15 @@ private enum BenchmarkError: Error, LocalizedError {
   case dflashPassthrough(Int, String)
   case promptCacheNotUsed(Int)
   case coldPromptUnexpectedlyCached(Int, Int)
+  case unsupportedMistralHotCacheModel
+  case mistralHotCacheSeedUnexpectedlyCached(Int, Int)
+  case mistralHotCacheNotUsed(Int)
+  case mistralHotCacheColdUnexpectedlyCached(Int, Int)
+  case mistralHotCachePromptCountMismatch(Int, Int, Int)
+  case mistralHotCacheDidNotReducePrefill(Int, Int, Int, Int)
+  case mistralHotCachePartialReuse(Int, Int, Int)
+  case mistralHotCachePrefillAccountingMismatch(Int, Int, Int, Int)
+  case mistralHotCacheSeedOutputMismatch(Int, Int, Int?)
 
   var errorDescription: String? {
     switch self {
@@ -217,6 +269,27 @@ private enum BenchmarkError: Error, LocalizedError {
       "Prompt-cache generation \(sequence) reused no prompt tokens; this mode requires native Laguna prompt-cache support."
     case .coldPromptUnexpectedlyCached(let sequence, let count):
       "Cold prompt-cache replay \(sequence) unexpectedly reused \(count) prompt tokens."
+    case .unsupportedMistralHotCacheModel:
+      "--mistral-hot-cache-ab requires a Mistral, Mistral 3/Ministral, or Mixtral text checkpoint."
+    case .mistralHotCacheSeedUnexpectedlyCached(let sequence, let count):
+      "Mistral hot-cache seed \(sequence) unexpectedly reused \(count) prompt tokens."
+    case .mistralHotCacheNotUsed(let sequence):
+      "Mistral hot-cache continuation \(sequence) reused no prompt tokens."
+    case .mistralHotCacheColdUnexpectedlyCached(let sequence, let count):
+      "Mistral cold continuation \(sequence) unexpectedly reused \(count) prompt tokens."
+    case .mistralHotCachePromptCountMismatch(let cachedSequence, let coldSequence, let delta):
+      "Mistral hot/cold continuations \(cachedSequence)/\(coldSequence) rendered different prompt lengths (delta \(delta))."
+    case .mistralHotCacheDidNotReducePrefill(
+      let cachedSequence, let coldSequence, let cachedCount, let coldCount):
+      "Mistral hot/cold continuations \(cachedSequence)/\(coldSequence) did not reduce prefill tokens (\(cachedCount) versus \(coldCount))."
+    case .mistralHotCachePartialReuse(let sequence, let actual, let expected):
+      "Mistral hot-cache continuation \(sequence) reused \(actual)/\(expected) seed tokens; a full append-only reuse is required."
+    case .mistralHotCachePrefillAccountingMismatch(
+      let sequence, let actual, let total, let reused):
+      "Mistral hot-cache continuation \(sequence) reported \(actual) prefilled prompt tokens; expected \(total - reused) (\(total) total minus \(reused) reused)."
+    case .mistralHotCacheSeedOutputMismatch(let firstSequence, let secondSequence, let offset):
+      "Mistral hot-cache seeds \(firstSequence)/\(secondSequence) produced different greedy text"
+        + (offset.map { " at UTF-8 byte \($0)." } ?? ".")
     }
   }
 }
@@ -274,6 +347,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
   )
   var promptCache = false
 
+  @Flag(
+    name: .customLong("mistral-hot-cache-ab"),
+    help:
+      "Alternate cached and forced-cold append-only continuations on one loaded Mistral-family model; reports TTFT and cache/prefill token counts."
+  )
+  var mistralHotCacheAB = false
+
   @Option(help: "Warm-up generations excluded from the medians.")
   var warmups = 1
 
@@ -286,7 +366,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
 
   @Option(
     help:
-      "Second deterministic user turn used by --prompt-cache."
+      "Second deterministic user turn used by --prompt-cache and --mistral-hot-cache-ab."
   )
   var continuationPrompt =
     "Continue from exactly where you stopped, adding new implementation details and code without repeating the earlier response."
@@ -326,11 +406,21 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     if promptCache, dflashModel != nil {
       throw ValidationError("--prompt-cache cannot be combined with --dflash-model.")
     }
-    let exclusiveModes = [dflashAB, lagunaFusionAB, lagunaAttentionGateAB, promptCache]
-      .filter { $0 }.count
+    if mistralHotCacheAB, dflashModel != nil {
+      throw ValidationError("--mistral-hot-cache-ab cannot be combined with --dflash-model.")
+    }
+    if mistralHotCacheAB, allowEarlyStop {
+      throw ValidationError(
+        "--mistral-hot-cache-ab cannot be combined with --allow-early-stop."
+      )
+    }
+    let exclusiveModes = [
+      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, promptCache,
+      mistralHotCacheAB,
+    ].filter { $0 }.count
     if exclusiveModes > 1 {
       throw ValidationError(
-        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, and --prompt-cache are mutually exclusive."
+        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --prompt-cache, and --mistral-hot-cache-ab are mutually exclusive."
       )
     }
   }
@@ -364,6 +454,9 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       dflashModelPath: dflashModel,
       dflashBlockSize: dflashBlockSize
     )
+    if mistralHotCacheAB, !runner.supportsMistralHotConversationCache {
+      throw BenchmarkError.unsupportedMistralHotCacheModel
+    }
     let messages = [OpenAIMessage(role: "user", content: prompt)]
     var warmupRecords = [RecordedTrial]()
     var measuredRecords = [RecordedTrial]()
@@ -414,6 +507,33 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         sequence += records.count
         measuredRecords.append(contentsOf: records)
         printPromptCacheProbe(records, prefix: "trial \(trialIndex + 1)/\(trials)")
+      }
+    } else if mistralHotCacheAB {
+      for warmupIndex in 0..<warmups {
+        let records = try await runMistralHotCacheProbe(
+          runner: runner,
+          sequence: sequence,
+          seedMessages: messages,
+          mode: ordinaryMode,
+          coldFirst: warmupIndex.isMultiple(of: 2)
+        )
+        sequence += records.count
+        warmupRecords.append(contentsOf: records)
+        printMistralHotCacheProbe(
+          records, prefix: "warmup \(warmupIndex + 1)/\(warmups)")
+      }
+      for trialIndex in 0..<trials {
+        let records = try await runMistralHotCacheProbe(
+          runner: runner,
+          sequence: sequence,
+          seedMessages: messages,
+          mode: ordinaryMode,
+          coldFirst: trialIndex.isMultiple(of: 2)
+        )
+        sequence += records.count
+        measuredRecords.append(contentsOf: records)
+        printMistralHotCacheProbe(
+          records, prefix: "trial \(trialIndex + 1)/\(trials)")
       }
     } else {
       let warmupModes: [GenerationMode]
@@ -494,6 +614,12 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     let promptCacheColdRecords = measuredRecords.filter {
       $0.mode == "prompt_cache_cold"
     }
+    let mistralHotCacheCachedRecords = measuredRecords.filter {
+      $0.mode == "mistral_hot_cache_cached"
+    }
+    let mistralHotCacheColdRecords = measuredRecords.filter {
+      $0.mode == "mistral_hot_cache_cold"
+    }
     let primaryRecords: [RecordedTrial]
     if dflashAB {
       primaryRecords = dflashRecords
@@ -501,7 +627,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       primaryRecords = fusionOnRecords
     } else if lagunaAttentionGateAB {
       primaryRecords = attentionGateCompiledRecords
-    } else if promptCache {
+    } else if promptCache || mistralHotCacheAB {
       primaryRecords = []
     } else {
       primaryRecords = measuredRecords
@@ -598,6 +724,37 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else {
       promptCacheModeComparison = nil
     }
+    let mistralHotCacheModeComparison: MistralHotCacheABComparison?
+    if mistralHotCacheAB {
+      let cachedTTFT = median(
+        mistralHotCacheCachedRecords.map(\.timeToFirstTokenMilliseconds))
+      let coldTTFT = median(
+        mistralHotCacheColdRecords.map(\.timeToFirstTokenMilliseconds))
+      let outputsMatch = mistralHotCacheOutputsMatchExactly(measuredRecords)
+      let firstDivergence = mistralHotCacheFirstOutputDivergence(measuredRecords)
+      mistralHotCacheModeComparison = MistralHotCacheABComparison(
+        trialsPerMode: trials,
+        cachedMedianTimeToFirstTokenMilliseconds: cachedTTFT,
+        coldMedianTimeToFirstTokenMilliseconds: coldTTFT,
+        cachedTTFTReductionPercent: 100 * (1 - cachedTTFT / coldTTFT),
+        cachedMedianTotalPromptTokenCount: median(
+          mistralHotCacheCachedRecords.map { Double($0.metrics.promptTokenCount) }),
+        cachedMedianPrefilledPromptTokenCount: median(
+          mistralHotCacheCachedRecords.map { Double($0.metrics.prefilledPromptTokenCount) }),
+        cachedMedianReusedPromptTokenCount: median(
+          mistralHotCacheCachedRecords.map { Double($0.metrics.cachedPromptTokenCount) }),
+        coldMedianTotalPromptTokenCount: median(
+          mistralHotCacheColdRecords.map { Double($0.metrics.promptTokenCount) }),
+        coldMedianPrefilledPromptTokenCount: median(
+          mistralHotCacheColdRecords.map { Double($0.metrics.prefilledPromptTokenCount) }),
+        coldMedianReusedPromptTokenCount: median(
+          mistralHotCacheColdRecords.map { Double($0.metrics.cachedPromptTokenCount) }),
+        outputsMatchExactly: outputsMatch,
+        firstOutputDivergenceUTF8Offset: firstDivergence
+      )
+    } else {
+      mistralHotCacheModeComparison = nil
+    }
 
     let report = RuntimeBenchmarkReport(
       createdAt: ISO8601DateFormatter().string(from: Date()),
@@ -607,17 +764,20 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       dflashBlockSize: runner.dflashBlockSize,
       engine: runner.engine.rawValue,
       prompt: prompt,
+      continuationPrompt: continuationPrompt,
+      allowEarlyStop: allowEarlyStop,
       requestedTokens: tokens,
       warmupCount: warmupRecords.count,
       measuredTrials: measuredRecords.count,
-      medianPromptTokensPerSecond: promptCache
+      medianPromptTokensPerSecond: promptCache || mistralHotCacheAB
         ? nil : median(primaryRecords.map(\.metrics.promptTokensPerSecond)),
-      medianDecodeTokensPerSecond: promptCache
+      medianDecodeTokensPerSecond: promptCache || mistralHotCacheAB
         ? nil : median(primaryRecords.map(\.metrics.tokensPerSecond)),
       dflashABComparison: dflashComparison,
       lagunaFusionABComparison: lagunaFusionComparison,
       lagunaAttentionGateABComparison: lagunaAttentionGateComparison,
       promptCacheComparison: promptCacheModeComparison,
+      mistralHotCacheABComparison: mistralHotCacheModeComparison,
       warmups: warmupRecords,
       trials: measuredRecords
     )
@@ -675,6 +835,28 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         )
       )
       print("continuation outputs match exactly: \(comparison.outputsMatchExactly)")
+    } else if let comparison = mistralHotCacheModeComparison {
+      print(
+        String(
+          format:
+            "Mistral hot-cache median TTFT: cached %.2f ms, cold %.2f ms (%+.2f%% reduction)",
+          comparison.cachedMedianTimeToFirstTokenMilliseconds,
+          comparison.coldMedianTimeToFirstTokenMilliseconds,
+          comparison.cachedTTFTReductionPercent
+        )
+      )
+      print(
+        String(
+          format: "prompt tokens (hot): %.0f total, %.0f reused, %.0f prefilled",
+          comparison.cachedMedianTotalPromptTokenCount,
+          comparison.cachedMedianReusedPromptTokenCount,
+          comparison.cachedMedianPrefilledPromptTokenCount
+        )
+      )
+      print("continuation outputs match exactly: \(comparison.outputsMatchExactly)")
+      if let offset = comparison.firstOutputDivergenceUTF8Offset {
+        print("continuation first output divergence: UTF-8 byte \(offset)")
+      }
     } else {
       guard let medianDecode = report.medianDecodeTokensPerSecond else {
         throw BenchmarkError.invalidInput("missing decode median")
@@ -795,6 +977,147 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     return [seed, displacement, cached, cold]
   }
 
+  private func runMistralHotCacheProbe(
+    runner: LocalModelRunner,
+    sequence: Int,
+    seedMessages: [OpenAIMessage],
+    mode: GenerationMode,
+    coldFirst: Bool
+  ) async throws -> [RecordedTrial] {
+    var cachedMode = mode
+    cachedMode.label = "mistral_hot_cache_cached"
+    var coldMode = mode
+    coldMode.label = "mistral_hot_cache_cold"
+    coldMode.usePromptCache = false
+
+    let cachedSeed: RecordedTrial
+    let coldSeed: RecordedTrial
+    let cached: RecordedTrial
+    let cold: RecordedTrial
+    if coldFirst {
+      coldSeed = try await runMistralHotCacheSeed(
+        runner: runner, sequence: sequence, messages: seedMessages, mode: mode,
+        label: "mistral_hot_cache_seed_before_cold")
+      cold = try await runGeneration(
+        runner: runner, messages: continuationMessages(seedMessages, coldSeed),
+        sequence: sequence + 1,
+        mode: coldMode)
+      cachedSeed = try await runMistralHotCacheSeed(
+        runner: runner, sequence: sequence + 2, messages: seedMessages, mode: mode,
+        label: "mistral_hot_cache_seed_before_cached")
+      cached = try await runGeneration(
+        runner: runner, messages: continuationMessages(seedMessages, cachedSeed),
+        sequence: sequence + 3,
+        mode: cachedMode)
+    } else {
+      cachedSeed = try await runMistralHotCacheSeed(
+        runner: runner, sequence: sequence, messages: seedMessages, mode: mode,
+        label: "mistral_hot_cache_seed_before_cached")
+      cached = try await runGeneration(
+        runner: runner, messages: continuationMessages(seedMessages, cachedSeed),
+        sequence: sequence + 1,
+        mode: cachedMode)
+      coldSeed = try await runMistralHotCacheSeed(
+        runner: runner, sequence: sequence + 2, messages: seedMessages, mode: mode,
+        label: "mistral_hot_cache_seed_before_cold")
+      cold = try await runGeneration(
+        runner: runner, messages: continuationMessages(seedMessages, coldSeed),
+        sequence: sequence + 3,
+        mode: coldMode)
+    }
+
+    guard cachedSeed.content == coldSeed.content else {
+      throw BenchmarkError.mistralHotCacheSeedOutputMismatch(
+        cachedSeed.sequence,
+        coldSeed.sequence,
+        firstUTF8DivergenceOffset(cachedSeed.content, coldSeed.content)
+      )
+    }
+    guard cached.metrics.cachedPromptTokenCount > 0 else {
+      throw BenchmarkError.mistralHotCacheNotUsed(cached.sequence)
+    }
+    let expectedCachedPromptTokenCount =
+      cachedSeed.metrics.promptTokenCount + cachedSeed.metrics.generationTokenCount
+    guard cached.metrics.cachedPromptTokenCount == expectedCachedPromptTokenCount else {
+      throw BenchmarkError.mistralHotCachePartialReuse(
+        cached.sequence,
+        cached.metrics.cachedPromptTokenCount,
+        expectedCachedPromptTokenCount
+      )
+    }
+    guard
+      cached.metrics.prefilledPromptTokenCount
+        == cached.metrics.promptTokenCount - cached.metrics.cachedPromptTokenCount
+    else {
+      throw BenchmarkError.mistralHotCachePrefillAccountingMismatch(
+        cached.sequence,
+        cached.metrics.prefilledPromptTokenCount,
+        cached.metrics.promptTokenCount,
+        cached.metrics.cachedPromptTokenCount
+      )
+    }
+    guard cold.metrics.cachedPromptTokenCount == 0 else {
+      throw BenchmarkError.mistralHotCacheColdUnexpectedlyCached(
+        cold.sequence, cold.metrics.cachedPromptTokenCount)
+    }
+    guard cold.metrics.prefilledPromptTokenCount == cold.metrics.promptTokenCount else {
+      throw BenchmarkError.mistralHotCachePrefillAccountingMismatch(
+        cold.sequence,
+        cold.metrics.prefilledPromptTokenCount,
+        cold.metrics.promptTokenCount,
+        cold.metrics.cachedPromptTokenCount
+      )
+    }
+    guard cached.metrics.promptTokenCount == cold.metrics.promptTokenCount else {
+      throw BenchmarkError.mistralHotCachePromptCountMismatch(
+        cached.sequence,
+        cold.sequence,
+        cached.metrics.promptTokenCount - cold.metrics.promptTokenCount
+      )
+    }
+    guard
+      cached.metrics.prefilledPromptTokenCount
+        < cold.metrics.prefilledPromptTokenCount
+    else {
+      throw BenchmarkError.mistralHotCacheDidNotReducePrefill(
+        cached.sequence,
+        cold.sequence,
+        cached.metrics.prefilledPromptTokenCount,
+        cold.metrics.prefilledPromptTokenCount
+      )
+    }
+    return coldFirst
+      ? [coldSeed, cold, cachedSeed, cached]
+      : [cachedSeed, cached, coldSeed, cold]
+  }
+
+  private func runMistralHotCacheSeed(
+    runner: LocalModelRunner,
+    sequence: Int,
+    messages: [OpenAIMessage],
+    mode: GenerationMode,
+    label: String
+  ) async throws -> RecordedTrial {
+    var seedMode = mode
+    seedMode.label = label
+    let seed = try await runGeneration(
+      runner: runner, messages: messages, sequence: sequence, mode: seedMode)
+    guard seed.metrics.cachedPromptTokenCount == 0 else {
+      throw BenchmarkError.mistralHotCacheSeedUnexpectedlyCached(
+        seed.sequence, seed.metrics.cachedPromptTokenCount)
+    }
+    return seed
+  }
+
+  private func continuationMessages(
+    _ seedMessages: [OpenAIMessage], _ seed: RecordedTrial
+  ) -> [OpenAIMessage] {
+    seedMessages + [
+      OpenAIMessage(role: "assistant", content: seed.content),
+      OpenAIMessage(role: "user", content: continuationPrompt),
+    ]
+  }
+
   private func median(_ values: [Double]) -> Double {
     let sorted = values.sorted()
     let middle = sorted.count / 2
@@ -802,6 +1125,36 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       return (sorted[middle - 1] + sorted[middle]) / 2
     }
     return sorted[middle]
+  }
+
+  private func mistralHotCacheOutputsMatchExactly(_ records: [RecordedTrial]) -> Bool {
+    guard records.count.isMultiple(of: 4) else { return false }
+    return stride(from: 0, to: records.count, by: 4).allSatisfy { start in
+      let probe = records[start..<(start + 4)]
+      guard
+        let cached = probe.first(where: { $0.mode == "mistral_hot_cache_cached" }),
+        let cold = probe.first(where: { $0.mode == "mistral_hot_cache_cold" })
+      else {
+        return false
+      }
+      return cached.content == cold.content
+    }
+  }
+
+  private func mistralHotCacheFirstOutputDivergence(
+    _ records: [RecordedTrial]
+  ) -> Int? {
+    guard records.count.isMultiple(of: 4) else { return nil }
+    return stride(from: 0, to: records.count, by: 4).compactMap { start in
+      let probe = records[start..<(start + 4)]
+      guard
+        let cached = probe.first(where: { $0.mode == "mistral_hot_cache_cached" }),
+        let cold = probe.first(where: { $0.mode == "mistral_hot_cache_cold" })
+      else {
+        return nil
+      }
+      return firstUTF8DivergenceOffset(cached.content, cold.content)
+    }.min()
   }
 
   private func firstUTF8DivergenceOffset(_ lhs: String, _ rhs: String) -> Int? {
@@ -826,6 +1179,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     print("\(prefix) [prompt_cache_displacement]: " + trialSummary(records[1]))
     print("\(prefix) [prompt_cache_cached]: " + trialSummary(records[2]))
     print("\(prefix) [prompt_cache_cold]: " + trialSummary(records[3]))
+  }
+
+  private func printMistralHotCacheProbe(_ records: [RecordedTrial], prefix: String) {
+    guard records.count == 4 else { return }
+    for record in records {
+      print("\(prefix) [\(record.mode)]: " + trialSummary(record))
+    }
   }
 
   private func trialSummary(_ record: RecordedTrial) -> String {

@@ -19,7 +19,7 @@ VALID_PROFILE='configuration=release:cuda:sm_89:mlx-cross-thread-stream-overlay=
 make_source() {
   local scratch="$1"
   local body="$2"
-  local source="$scratch/x86_64-unknown-linux-gnu/release/model-runner"
+  local source="$scratch/x86_64-unknown-linux-gnu/release/midnight"
 
   mkdir -p "$(dirname "$source")"
   printf '#!/usr/bin/env bash\nprintf %%s\\n %q\n' "$body" > "$source"
@@ -60,7 +60,7 @@ model_runner_publish_rtx4090_release \
 cmp -s "$VALID_SOURCE" "$MODEL_RUNNER_RTX4090_STABLE_PATH"
 model_runner_verify_rtx4090_publication "$VALID_PACKAGE" "$VALID_SCRATCH"
 if find "$VALID_PACKAGE/bin" "$VALID_PACKAGE/.build/release" \
-  -maxdepth 1 -name '.model-runner-*.*' -print | grep -q .; then
+  -maxdepth 1 -name '.midnight-*.*' -print | grep -q .; then
   echo "publisher left a staged temporary file behind" >&2
   exit 1
 fi
@@ -100,8 +100,8 @@ expect_publish_failure() {
       ;;
     regular-compatibility-path)
       mkdir -p "$package/.build/release"
-      printf 'unmanaged\n' > "$package/.build/release/model-runner"
-      chmod 0755 "$package/.build/release/model-runner"
+      printf 'unmanaged\n' > "$package/.build/release/midnight"
+      chmod 0755 "$package/.build/release/midnight"
       ;;
     *)
       echo "unknown failure fixture: $mode" >&2
@@ -143,9 +143,9 @@ RUN_SCRIPT="$PACKAGE_ROOT/run.sh"
 SMOKE_SCRIPT="$PACKAGE_ROOT/Scripts/smoke-cuda-model.sh"
 grep -Fq 'SWIFT_BUILD_CONFIGURATION="release"' "$BUILD_SCRIPT"
 grep -Fq 'model_runner_publish_rtx4090_release' "$BUILD_SCRIPT"
-grep -Fq 'DEFAULT_RELEASE_RUNNER="$PACKAGE_ROOT/.build/release/model-runner"' "$BUILD_SCRIPT"
+grep -Fq 'DEFAULT_RELEASE_RUNNER="$PACKAGE_ROOT/.build/release/midnight"' "$BUILD_SCRIPT"
 grep -Fq 'model_runner_verify_rtx4090_publication' "$RUN_SCRIPT"
 grep -Fq 'model_runner_verify_rtx4090_publication' "$SMOKE_SCRIPT"
-grep -Fq 'bin/model-runner-rtx4090' "$PACKAGE_ROOT/.gitignore"
+grep -Fq 'bin/midnight-rtx4090' "$PACKAGE_ROOT/.gitignore"
 
 echo "Release publisher checks passed"

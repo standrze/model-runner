@@ -242,17 +242,27 @@ Mistral and Voxtral remain first-class. The persistent-stream correction is
 shared by text generation and native Voxtral synthesis, and the public server
 keeps both OpenAI and Mistral speech dialects without a provider-mode switch.
 
-The next Mistral performance work is model-specific rather than API-specific.
-Classic Mistral currently uses the upstream Swift `LlamaModel`, while Mistral 3
-uses `Mistral3TextModel`; both issue separate gate/up and Q/K/V projections.
+The Mistral runtime policy is family-wide rather than checkpoint-name-specific.
+Classic Mistral, Mistral 3/Ministral, and Mixtral now share the zero-copy hot
+conversation path, while cache-disabled requests preserve one-shot generation.
+Classic Mistral still uses the upstream Swift `LlamaModel`, augmented by a
+separate pinned patch that honors `layer_types` and `sliding_window`; Mistral 3
+keeps its existing `Mistral3TextModel` hybrid cache. Laguna's independent
+compiled and branch-snapshot paths are unchanged.
+
+The remaining Mistral graph work is model-specific rather than API-specific.
+Classic Mistral and Mistral 3 both issue separate gate/up and Q/K/V projections.
 Mistral-7B-shaped Metal probes were repeated on MLX 0.32.2. Compiled-only
 SwiGLU reached 0.983x current throughput, packed-row gate/up reached 0.722x,
 and packed QKV reached 0.955x end-to-end. All outputs matched, but none is
 enabled because none cleared the performance gate. The next gate is a real
-checkpoint benchmark. Mixtral separately needs compiled routing and residual
-reduction with its selected-logit softmax semantics preserved. No full Mistral
-checkpoint is currently installed on this MacBook, so no Mistral throughput
-claim has been made yet.
+checkpoint benchmark. The pinned Swift backend now backports Mixtral's
+single-row Metal router top-k/gather specialization, guarded to GPU evaluation
+mode with the original expression retained for CPU, training, and multi-token
+prefill. Its outputs are tested bit-for-bit, including zero and
+negative logits, while further routed-reduction work must preserve the
+selected-logit softmax semantics. No full Mistral checkpoint is currently
+installed on this MacBook, so no Mistral throughput claim has been made yet.
 
 See [MacBook MLX performance](macbook-mlx-performance.md) for the exact core
 revision audit, current Ollama controls, DFlash result, and acceptance gates.
@@ -273,4 +283,7 @@ revision audit, current Ollama controls, DFlash result, and acceptance gates.
 - [Ollama Laguna MLX model](https://github.com/ollama/ollama/blob/v0.33.1/x/models/laguna/laguna.go)
 - [MLX Swift 0.32 update](https://github.com/ml-explore/mlx-swift/pull/450)
 - [MLX 0.32.2 release](https://github.com/ml-explore/mlx/releases/tag/v0.32.2)
+- [MLX-LM heterogeneous Mistral attention](https://github.com/ml-explore/mlx-lm/commit/dcb4b9ba6db5)
+- [MLX Swift LM fused Mixtral router](https://github.com/ml-explore/mlx-swift-lm/commit/db767efca373bcc215e2c340e97751c28f570491)
+- [Authoritative Ministral 8B hybrid configuration](https://huggingface.co/mistralai/Ministral-8B-Instruct-2410/blob/main/config.json)
 - [MLX M5 Max NVFP4 QMV optimization](https://github.com/ml-explore/mlx/commit/5a1e44c3bb991dab753cee394b0b1d889e2eb9a7)

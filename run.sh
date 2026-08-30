@@ -28,4 +28,4 @@ else
     BIN_DIR="$(swift build --show-bin-path)"
   fi
 fi
-exec "$BIN_DIR/model-runner" "$@"
+exec "$BIN_DIR/midnight" "$@"

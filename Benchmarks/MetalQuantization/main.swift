@@ -27,6 +27,11 @@ private struct PairedMeasurement {
   let secondExecutionMilliseconds: [Double]
 }
 
+private struct QMVValidation {
+  let maxAbsoluteError: Double
+  let outputHash: String
+}
+
 private let quantizationCases = [
   QuantizationCase(name: "affine-4bit-g64", mode: .affine, groupSize: 64, bits: 4),
   QuantizationCase(name: "affine-4bit-g128", mode: .affine, groupSize: 128, bits: 4),
@@ -44,6 +49,7 @@ private let scaleSearchOnly = CommandLine.arguments.contains("--scale-search-onl
 private let formatABOnly = CommandLine.arguments.contains("--format-ab")
 private let lagunaGraphABOnly = CommandLine.arguments.contains("--laguna-graph-ab")
 private let mistralGraphABOnly = CommandLine.arguments.contains("--mistral-graph-ab")
+private let qmvSpecializationOnly = CommandLine.arguments.contains("--qmv-specialization")
 
 private let siluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
   shapeless: true
@@ -65,6 +71,8 @@ if scaleSearchOnly {
   benchmarkLagunaGraphAB()
 } else if mistralGraphABOnly {
   benchmarkMistralGraphAB()
+} else if qmvSpecializationOnly {
+  benchmarkAffineQ4QMVSpecialization()
 } else {
   MLXRandom.seed(7)
   Memory.cacheLimit = 256 * 1_024 * 1_024
@@ -151,6 +159,181 @@ if scaleSearchOnly {
   print(
     "fused_speedup\t"
       + "\(format(median(sharedGateUp.separate.queued) / median(sharedGateUp.fused.queued)))x"
+  )
+}
+
+private func benchmarkAffineQ4QMVSpecialization() {
+  MLXRandom.seed(7)
+  Memory.cacheLimit = 256 * 1_024 * 1_024
+
+  let quantization = QuantizationCase(
+    name: "affine-4bit-g64", mode: .affine, groupSize: 64, bits: 4)
+  let requestedResults = ProcessInfo.processInfo.environment[
+    "MLX_METAL_AFFINE_QMV_RESULTS_PER_SIMDGROUP"
+  ] ?? "stock"
+  let minimumOutputs = ProcessInfo.processInfo.environment[
+    "MLX_METAL_AFFINE_QMV_MIN_OUTPUTS"
+  ] ?? "0"
+
+  print("Laguna affine-Q4/G64 QMV specialization benchmark")
+  print(
+    "results_per_simdgroup=\(requestedResults) minimum_outputs=\(minimumOutputs) "
+      + "warmup=\(warmupCount) "
+      + "iterations=\(iterationCount) queue_depth=\(queueDepth) "
+      + "queue_rounds=\(queueRounds) dtype=bfloat16"
+  )
+  print(
+    "workload\tmax_abs_error\toutput_hash\tsync_median_ms\tsync_min_ms"
+      + "\tqueued_ms_per_op"
+  )
+
+  let denseShapes = [
+    (workload: "dense-2048x6144", input: 2_048, output: 6_144),
+    (workload: "dense-2048x8192", input: 2_048, output: 8_192),
+    (workload: "dense-2048x16384", input: 2_048, output: 16_384),
+    (workload: "dense-lm-head-2048x100352", input: 2_048, output: 100_352),
+  ]
+  for shape in denseShapes {
+    let error = validateDenseAffineQ4(
+      inputDimensions: shape.input, outputDimensions: shape.output)
+    let measurement = benchmarkDense(
+      quantization,
+      workload: shape.workload,
+      inputDimensions: shape.input,
+      outputDimensions: shape.output
+    )
+    printSpecializationMeasurement(measurement, validation: error)
+    Memory.clearCache()
+  }
+
+  let gatherShapes = [
+    (workload: "gather-gate-up-2048x1024", input: 2_048, output: 1_024),
+    (workload: "gather-down-512x2048", input: 512, output: 2_048),
+  ]
+  for shape in gatherShapes {
+    let error = validateGatherAffineQ4(
+      inputDimensions: shape.input, outputDimensions: shape.output)
+    let measurement = benchmarkExpertGather(
+      quantization,
+      workload: shape.workload,
+      inputDimensions: shape.input,
+      outputDimensions: shape.output,
+      numberOfExperts: 256,
+      selectedExperts: 8
+    )
+    printSpecializationMeasurement(measurement, validation: error)
+    Memory.clearCache()
+  }
+}
+
+private func printSpecializationMeasurement(
+  _ measurement: Measurement,
+  validation: QMVValidation
+) {
+  print(
+    "\(measurement.workload)\t\(format(validation.maxAbsoluteError))\t"
+      + "\(validation.outputHash)\t"
+      + "\(format(measurement.synchronizedMedianMilliseconds))\t"
+      + "\(format(measurement.synchronizedMinimumMilliseconds))\t"
+      + "\(format(measurement.queuedMilliseconds))"
+  )
+}
+
+private func validateDenseAffineQ4(
+  inputDimensions: Int,
+  outputDimensions: Int
+) -> QMVValidation {
+  let input = MLXRandom.normal([1, inputDimensions], dtype: .bfloat16)
+  let weight = MLXRandom.normal(
+    [outputDimensions, inputDimensions], dtype: .bfloat16, scale: 0.02)
+  let packed = quantized(weight, groupSize: 64, bits: 4, mode: .affine)
+  let restored = dequantized(
+    packed.wq,
+    scales: packed.scales,
+    biases: packed.biases,
+    groupSize: 64,
+    bits: 4,
+    mode: .affine,
+    dtype: .bfloat16
+  )
+  let expected = matmul(input, restored.T)
+  let actual = quantizedMM(
+    input,
+    packed.wq,
+    scales: packed.scales,
+    biases: packed.biases,
+    transpose: true,
+    groupSize: 64,
+    bits: 4,
+    mode: .affine
+  )
+  return validateQMVOutput(actual: actual, expected: expected)
+}
+
+private func validateGatherAffineQ4(
+  inputDimensions: Int,
+  outputDimensions: Int
+) -> QMVValidation {
+  let numberOfExperts = 8
+  let selectedExperts = 8
+  let input = MLXRandom.normal(
+    [1, 1, 1, 1, inputDimensions], dtype: .bfloat16)
+  let weight = MLXRandom.normal(
+    [numberOfExperts, outputDimensions, inputDimensions],
+    dtype: .bfloat16,
+    scale: 0.02
+  )
+  let indices = MLXArray(Array(0..<selectedExperts), [1, 1, selectedExperts])
+  let packed = quantized(weight, groupSize: 64, bits: 4, mode: .affine)
+  let restored = dequantized(
+    packed.wq,
+    scales: packed.scales,
+    biases: packed.biases,
+    groupSize: 64,
+    bits: 4,
+    mode: .affine,
+    dtype: .bfloat16
+  )
+  let expected = gatherMM(
+    input, restored.swappedAxes(-1, -2), rhsIndices: indices)
+  let actual = gatherQuantizedMM(
+    input,
+    packed.wq,
+    scales: packed.scales,
+    biases: packed.biases,
+    rhsIndices: indices,
+    transpose: true,
+    groupSize: 64,
+    bits: 4,
+    mode: .affine
+  )
+  return validateQMVOutput(actual: actual, expected: expected)
+}
+
+private func validateQMVOutput(actual: MLXArray, expected: MLXArray) -> QMVValidation {
+  precondition(actual.shape == expected.shape, "specialized QMV changed the output shape")
+  let actualFloat = actual.asType(.float32)
+  let close = actual.allClose(expected, rtol: 0.02, atol: 0.04)
+  let maxError = MLX.max((actualFloat - expected.asType(.float32)).abs())
+  evaluate(actualFloat, close, maxError)
+  let isClose = close.item(Bool.self)
+  let maxErrorValue = Double(maxError.item(Float.self))
+  if !isClose {
+    print(
+      "validation_failed shape=\(actual.shape) max_abs_error=\(maxErrorValue) "
+        + "rtol=0.02 atol=0.04"
+    )
+  }
+  precondition(isClose, "specialized QMV failed numerical validation")
+
+  var outputHash: UInt64 = 1_469_598_103_934_665_603
+  for value in actualFloat.asArray(Float.self) {
+    outputHash ^= UInt64(value.bitPattern)
+    outputHash &*= 1_099_511_628_211
+  }
+  return QMVValidation(
+    maxAbsoluteError: maxErrorValue,
+    outputHash: String(format: "%016llx", outputHash)
   )
 }
 
@@ -792,6 +975,7 @@ private func benchmarkAffineScaleSearch() {
 
 private func benchmarkDense(
   _ quantization: QuantizationCase,
+  workload: String = "dense-qmv",
   inputDimensions: Int,
   outputDimensions: Int
 ) -> Measurement {
@@ -820,7 +1004,7 @@ private func benchmarkDense(
     )
   }
   return Measurement(
-    workload: "dense-qmv",
+    workload: workload,
     quantization: quantization.name,
     synchronizedMedianMilliseconds: median(times.synchronized),
     synchronizedMinimumMilliseconds: times.synchronized.min()!,

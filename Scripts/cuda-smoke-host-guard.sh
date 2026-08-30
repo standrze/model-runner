@@ -95,21 +95,21 @@ model_runner_smoke_assert_idle_host() {
       ;;
   esac
 
-  if runner_pids="$(pgrep -x model-runner)"; then
+  if runner_pids="$(pgrep -x midnight)"; then
     while IFS= read -r compute_pid; do
       compute_pid="$(printf '%s\n' "$compute_pid" | awk '{$1=$1};1')"
       if [[ ! "$compute_pid" =~ ^[1-9][0-9]*$ ]] \
         || [[ "$overlap_mode" != "allow-one" ]] \
         || [[ "$compute_pid" != "$allowed_pid" ]]
       then
-        echo "An existing model-runner process is active; refusing to overlap: $runner_pids" >&2
+        echo "An existing Midnight Runner process is active; refusing to overlap: $runner_pids" >&2
         return 1
       fi
     done <<< "$runner_pids"
   else
     pgrep_status=$?
     if [[ "$pgrep_status" != "1" ]]; then
-      echo "Could not inspect existing model-runner processes (pgrep status $pgrep_status)." >&2
+      echo "Could not inspect existing Midnight Runner processes (pgrep status $pgrep_status)." >&2
       return 1
     fi
   fi

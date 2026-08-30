@@ -19,9 +19,9 @@ case "$(uname -s)" in
       echo "SWIFT_BUILD_JOBS must be a positive integer." >&2
       exit 2
     fi
-    BUILD_PRODUCT="${MODEL_RUNNER_BUILD_PRODUCT:-model-runner}"
+    BUILD_PRODUCT="${MODEL_RUNNER_BUILD_PRODUCT:-midnight}"
     case "$BUILD_PRODUCT" in
-      model-runner|model-runner-quantize|model-runner-laguna-quantize|model-runner-laguna-q4r8-rescore|model-runner-laguna-q4r8-verify|model-runner-runtime-bench|model-runner-q4-scale-search-audit|model-runner-scale-plan|model-runner-metal-quant-bench) ;;
+      midnight|model-runner-quantize|model-runner-laguna-quantize|model-runner-laguna-q4r8-rescore|model-runner-laguna-q4r8-verify|model-runner-runtime-bench|model-runner-quality-bench|model-runner-q4-scale-search-audit|model-runner-scale-plan|model-runner-metal-quant-bench) ;;
       *)
         echo "Unsupported MODEL_RUNNER_BUILD_PRODUCT: $BUILD_PRODUCT" >&2
         exit 2
@@ -59,7 +59,7 @@ case "$(uname -s)" in
           ;;
         rtx-4090|4090)
           DEFAULT_CUDA_ARCH="sm_89"
-          if [[ "$BUILD_PRODUCT" == "model-runner" ]]; then
+          if [[ "$BUILD_PRODUCT" == "midnight" ]]; then
             PUBLISH_RTX4090_RELEASE=1
           fi
           ;;
@@ -154,15 +154,15 @@ case "$(uname -s)" in
       echo "SwiftPM did not produce a regular release executable at $BUILT_RUNNER" >&2
       exit 1
     fi
-    if [[ "$BUILD_PRODUCT" == "model-runner" \
+    if [[ "$BUILD_PRODUCT" == "midnight" \
       && "$MODEL_RUNNER_SWIFTPM_SCRATCH_PATH" == "$PACKAGE_ROOT/.build" ]]; then
-      DEFAULT_RELEASE_RUNNER="$PACKAGE_ROOT/.build/release/model-runner"
+      DEFAULT_RELEASE_RUNNER="$PACKAGE_ROOT/.build/release/midnight"
       if [[ ! -x "$DEFAULT_RELEASE_RUNNER" || ! "$DEFAULT_RELEASE_RUNNER" -ef "$BUILT_RUNNER" ]]; then
         echo "SwiftPM release compatibility path is missing or points at a different artifact:" >&2
         echo "$DEFAULT_RELEASE_RUNNER" >&2
         exit 1
       fi
-    elif [[ "$BUILD_PRODUCT" == "model-runner" \
+    elif [[ "$BUILD_PRODUCT" == "midnight" \
       && "$PUBLISH_RTX4090_RELEASE" == "1" ]]; then
       # MLX compiles some CUDA kernels after startup and discovers CUTLASS/CuTe
       # relative to the published executable. Publish only the exact header

@@ -1,9 +1,12 @@
-# MLX Model Runner
+# Midnight Runner
 
-A standalone Swift server that loads an MLX `.safetensors` model in-process
-and exposes OpenAI-compatible model, chat, and speech contracts plus local
-Mistral speech and voice contracts. It uses Metal on macOS, CUDA on Linux, or
-MLX's CPU backend.
+Midnight Runner is a standalone Swift server that loads an MLX `.safetensors`
+model in-process and exposes OpenAI-compatible model, chat, and speech contracts
+plus local Mistral speech and voice contracts. It uses Metal on macOS, CUDA on
+Linux, or MLX's CPU backend.
+
+> **Beta:** Midnight is a prerelease. CLI, API, and model-runtime behavior may
+> change before the first stable release.
 
 The separate `model-chat-swifttui` client connects to the runner over HTTP.
 
@@ -71,6 +74,16 @@ output, then perform the conversion directly:
   /absolute/path/model-q4r8-scalesearch
 ```
 
+Create a matched ordinary-affine-Q4 control from the same source by adding
+`--standard-q4` and choosing a separate destination:
+
+```bash
+.build/release/model-runner-quantize \
+  /absolute/path/unquantized-model \
+  /absolute/path/model-q4-standard-control \
+  --standard-q4
+```
+
 The default is ordinary MLX affine Q4 group-64 storage with ScaleSearch LS2
 used to derive `Linear` and `SwitchLinear` arrays. Embeddings and custom
 quantizable modules remain standard MLX Q4 because they do not accept the
@@ -79,6 +92,51 @@ affine Q8: Mixtral's `block_sparse_moe.gate`, Laguna's routed gate, GPT-OSS's
 router, and supported Qwen MoE gates. Repeated `--q8-module` and
 `--skip-module` path globs add explicit policy; unmatched or conflicting
 patterns fail before output mutation.
+
+The control uses the same affine Q4 group size, architecture sanitizer,
+per-layer Q8 overrides, and sharding path; only Q4 calibration differs. This
+keeps storage geometry and inference kernels matched for benchmarking. The
+default candidate writes `scale-search-quantization.json`; the control writes
+`standard-q4-quantization.json` and truthfully records every Q4 module as
+standard rather than searched. `--standard-q4` is intentionally unavailable
+with Laguna `--template`, so the proven template layout remains unchanged.
+
+### Matched model-quality benchmark
+
+`model-runner-quality-bench` measures teacher-forced next-token NLL and
+perplexity with the tokenizer and model loaded from one local checkpoint. It
+loads only one model per process and evaluates MLX cross-entropy from FP32 logits,
+while copying only the scalar loss to the CPU. Build it once, then run the BF16,
+ordinary-Q4, and ScaleSearch-Q4 artifacts separately against the same authored
+corpus:
+
+```bash
+MODEL_RUNNER_BUILD_CONFIGURATION=release \
+MODEL_RUNNER_BUILD_PRODUCT=model-runner-quality-bench \
+./build.sh
+
+.build/release/model-runner-quality-bench \
+  /absolute/path/Ministral-3-14B-BF16 \
+  Benchmarks/Quality/general-smoke.jsonl \
+  benchmark-results/ministral-bf16-quality.json
+
+.build/release/model-runner-quality-bench \
+  /absolute/path/Ministral-3-14B-Q4-standard \
+  Benchmarks/Quality/general-smoke.jsonl \
+  benchmark-results/ministral-q4-standard-quality.json
+
+.build/release/model-runner-quality-bench \
+  /absolute/path/Ministral-3-14B-Q4-ScaleSearch \
+  Benchmarks/Quality/general-smoke.jsonl \
+  benchmark-results/ministral-q4-scalesearch-quality.json
+```
+
+The three reports must have identical `corpus_fingerprint` and
+`token_id_fingerprint` values before comparing `token_weighted_nll` or
+`perplexity`; lower is better. The included corpus is a bounded comparative
+smoke gate, not a substitute for a broad external evaluation. Weight MSE alone
+is not a quality gate because it cannot capture activation propagation or
+next-token behavior.
 
 DFlash is a separate checkpoint from the Laguna target. The official
 `Laguna-XS-2.1-DFlash-INT4` artifact is a BF16 drafter trained to match the
@@ -276,6 +334,14 @@ swift run -c release model-runner-runtime-bench \
 
 ## Run
 
+The repository, build product, and command are named `midnight`; the Swift
+package and executable target use the conventional module spelling `Midnight`:
+
+```bash
+swift build --product midnight
+swift run midnight --list-models
+```
+
 Load an MLX model and listen on a chosen local port:
 
 ```bash
@@ -374,6 +440,58 @@ reduced median TTFT from 180.95 ms cold to 86.16 ms cached over three trials.
 The first unwarmed restore was slower than cold and output was not bit-identical,
 so measure representative long prefixes and apply the required reproducibility
 gate before treating the cache as a deployment win.
+
+Mistral, Mistral 3/Ministral, and Mixtral chat checkpoints use the same exact
+transcript reconciliation for the common append-only conversation path. Their
+hot session is zero-copy; unlike Laguna, they do not create immutable branch
+snapshots by default because copying a production KV cache after every turn can
+erase the prefill win and sharply raise peak memory. Setting
+`enablePromptCache` to false keeps the historical one-shot path. Custom stop
+strings also stay one-shot.
+
+Measure that hot append-only path against a forced-cold replay on one loaded
+checkpoint with:
+
+```bash
+Scripts/benchmark-runtime-model.sh \
+  /absolute/path/Mistral-or-Mixtral-checkpoint \
+  /absolute/path/mistral-hot-cache-ab.json \
+  --engine metal --tokens 512 --warmups 1 --trials 5 \
+  --mistral-hot-cache-ab
+```
+
+Each measured continuation gets its own identical one-turn seed because a
+forced-cold request intentionally clears the runner's hot session. The probe
+alternates the cold-seed/cold and cached-seed/cached pair order, and fails if
+the two seeds differ, the hot path does not reuse the seed's full prompt plus
+generated token count, the cold path reuses any tokens, or prefill is not
+reduced. Cached and cold numerical schedules can make greedy text diverge, so
+that difference is nonfatal: the JSON comparison records
+`outputs_match_exactly` and, when different, the earliest
+`first_output_divergence_utf8_offset`. The comparison is stored separately as
+`mistral_hot_cache_ab_comparison`;
+Laguna's `--prompt-cache` sibling-branch benchmark and
+`prompt_cache_comparison` remain unchanged. This A/B mode rejects
+`--allow-early-stop` so an unreported consumed EOS token cannot invalidate its
+exact cache-ledger assertion.
+
+The pinned Swift backend additionally honors classic Mistral checkpoint
+`layer_types` and `sliding_window` metadata. Explicit mixed full/sliding layouts
+are preserved layer by layer; a non-null window without `layer_types` is treated
+as the original all-sliding Mistral layout, while a null window remains full
+attention. The existing Mistral 3 hybrid implementation and Laguna model are
+unchanged. Older converted checkpoints whose `config.json` discarded the
+source model's hybrid metadata must be reconverted or have that metadata
+restored; the runner deliberately does not guess architecture from a folder or
+repository name.
+
+Mixtral also uses a pinned inference-only Metal specialization for the
+single-token router top-k and selected-logit gather. It is enabled only for an
+evaluation-mode model on the GPU; CPU execution, training, and multi-token
+prefill retain the original MLX expression. Dependency tests
+cover tied logits, zero-versus-negative ordering, exact selected values, and the
+CPU fallback. This removes router dispatches but does not imply an end-to-end
+tokens-per-second gain until a full Mixtral checkpoint is benchmarked.
 
 This controls memory tracked by the MLX allocator; it is not an operating-system limit on the entire process. Use a Linux cgroup or systemd memory limit as an additional boundary when a hard whole-process host-RAM limit is required.
 
@@ -587,18 +705,18 @@ SWIFT_BUILD_JOBS=1 ./build-cuda.sh rtx-4090
 `SWIFT_BUILD_JOBS` must be a positive integer.
 
 The resulting executable is under the selected SwiftPM scratch tree at
-`release/model-runner`. With the default scratch tree, the build verifies that
+`release/midnight`. With the default scratch tree, the build verifies that
 SwiftPM's standard compatibility path resolves to that same regular executable:
 
 ```text
-/home/sandrzej/model-runner-mlx/.build/release/model-runner
+/path/to/midnight/.build/release/midnight
 ```
 
 To keep a Linux build completely separate from the package's default `.build`
 tree, select a dedicated SwiftPM scratch directory:
 
 ```bash
-MODEL_RUNNER_SCRATCH_PATH="$HOME/.cache/model-runner-mlx/rtx-4090" \
+MODEL_RUNNER_SCRATCH_PATH="$HOME/.cache/midnight/rtx-4090" \
 ./build-cuda.sh rtx-4090
 ```
 
@@ -616,12 +734,12 @@ binary to be a regular executable inside that scratch tree, hashes it, and then
 atomically installs this stable copy:
 
 ```text
-bin/model-runner-rtx4090
+bin/midnight-rtx4090
 ```
 
-It writes `bin/model-runner-rtx4090.manifest` with the full build profile,
+It writes `bin/midnight-rtx4090.manifest` with the full build profile,
 source scratch/binary paths, destination paths, size, and SHA-256. The expected
-`.build/release/model-runner` path is an absolute symlink to that verified
+`.build/release/midnight` path is an absolute symlink to that verified
 stable copy, so it is never an unexplained duplicate in the default SwiftPM
 cache. `run-cuda.sh rtx-4090` verifies the manifest, profile provenance, hash,
 and symlink before executing it. The publisher refuses a missing or
@@ -629,7 +747,7 @@ non-executable source, a non-release or non-`sm_89` profile, a missing/mismatche
 profile marker, a changed prior hash, and any existing unmanaged file or link at
 the compatibility path. Conversely, a default-scratch build requires its
 SwiftPM product to be a regular executable and verifies that
-`.build/release/model-runner` resolves to that exact product, so the managed
+`.build/release/midnight` resolves to that exact product, so the managed
 custom publication cannot be mistaken for a default-cache build.
 
 The stable publication is intentionally specific to the named `rtx-4090`
@@ -717,16 +835,10 @@ set. The resolved compiler path, family, major version, and `--version`
 fingerprint are part of the backend build profile, so a compiler change
 invalidates the old build cache.
 
-The x86-64 `rtx-4090` profile now builds on the target NVIDIA host. Its verified
-stable executable is:
-
-```text
-/home/sandrzej/model-runner-mlx/bin/model-runner-rtx4090
-```
-
-Its SHA-256 is
-`61102141df480ab5e5c96a9642a4066e85fc906d3f39aa61e30fca07edefbc81`,
-and `.build/release/model-runner` is a verified symlink to that stable copy.
+The x86-64 `rtx-4090` profile builds on the target NVIDIA host. Rebuild it after
+the executable rename to publish `bin/midnight-rtx4090` with a fresh manifest
+and SHA-256; `.build/release/midnight` will be the verified symlink to that
+stable copy.
 The managed runtime companion contains complete, SHA-256-verified
 CUTLASS 4.3.5 `cutlass/` and `cute/` trees at the exact runner-relative path
 used by MLX's NVRTC compiler.
@@ -797,7 +909,7 @@ Every resource value may be lowered, but hard ceilings cannot be raised:
 - `MODEL_RUNNER_SMOKE_PORT` (1024 through 65535)
 - `MODEL_RUNNER_SMOKE_CPU_QUOTA_PERCENT` (maximum 400)
 
-By default, the harness refuses to start if any `model-runner` process, NVIDIA
+By default, the harness refuses to start if any `midnight` process, NVIDIA
 compute process, second visible GPU, or listener on the selected port already
 exists. A fail-closed opt-in permits exactly one explicitly protected compute
 PID to coexist:
@@ -824,7 +936,7 @@ launch. The transient service always binds to
 model, the harness re-runs the exact CUDA/dependency/host-compiler resolvers
 and resolves the selected runner through every symlink. It proceeds only when
 `dirname(realpath(runner))/../include` is exactly this project's managed
-`include/`; the verified compatibility link to `bin/model-runner-rtx4090`
+`include/`; the verified compatibility link to `bin/midnight-rtx4090`
 passes, while a SwiftPM scratch binary or arbitrary external `--runner` fails.
 Only after that check does it atomically publish a missing CUTLASS/CuTe
 companion and verify every recorded SHA-256. It never publishes into an
@@ -849,7 +961,7 @@ timeline spanning model load through chat. Override the parent with
 binary or link whose real path is inside this project's `bin/` directory; it
 does not authorize a different runtime-header root. When the verified RTX 4090
 publication manifest is present, the harness validates and uses the exact
-`.build/release/model-runner` compatibility link without needing the custom
+`.build/release/midnight` compatibility link without needing the custom
 scratch variable to be repeated.
 
 ## Use a remote GPU from the Mac client

@@ -1474,7 +1474,7 @@ private struct ModelResponse: Encodable {
     let id: String
     let created: Int
     let object = "model"
-    let ownedBy = "model-runner"
+    let ownedBy = "midnight"
 
     enum CodingKeys: String, CodingKey {
         case id, created, object

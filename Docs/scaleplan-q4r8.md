@@ -71,6 +71,22 @@ MODEL_RUNNER_BUILD_PRODUCT=model-runner-quantize \
   --dry-run
 ```
 
+For an ordinary-affine-Q4 control with matching storage geometry, run the same
+source through the generic converter with a separate destination:
+
+```bash
+.build/release/model-runner-quantize \
+  /absolute/path/unquantized-mlx-compatible-safetensors \
+  /absolute/path/q4-standard-control \
+  --standard-q4
+```
+
+This changes only eligible Q4 calibration from ScaleSearch to standard MLX
+affine Q4. Group size, architecture sanitizer, mandatory Q8 overrides, output
+sharding, and runtime format remain the same. Provenance is kept distinct as
+`standard-q4-quantization.json`; Laguna's bounded `--template` path does not
+accept this generic-control flag.
+
 The executable reads `model_type` and `architectures`, asks the pinned MLX
 Swift LLM or drafter registry to instantiate the real architecture, enumerates
 its quantizable leaf modules, and uses the architecture's sanitizer during
