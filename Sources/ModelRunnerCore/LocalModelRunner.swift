@@ -50,6 +50,22 @@ public struct LocalModelRunnerMetrics: Equatable, Sendable {
   }
 }
 
+struct LagunaDecodeFastPathSelection: Equatable {
+  var useCompiledBlockTail: Bool
+  var useFusedRouterTopK: Bool
+
+  static func resolve(
+    engine: ModelEngine,
+    compiledBlockTailOverride: Bool?,
+    fusedRouterTopKOverride: Bool?
+  ) -> Self {
+    let metalDefault = engine == .metal
+    return Self(
+      useCompiledBlockTail: compiledBlockTailOverride ?? metalDefault,
+      useFusedRouterTopK: fusedRouterTopKOverride ?? metalDefault)
+  }
+}
+
 private final class DFlashModelReference: @unchecked Sendable {
   let model: any MTPDrafterModel
 
@@ -488,24 +504,36 @@ public actor LocalModelRunner {
     enablePromptCache: Bool = true,
     enableSpeculativeDecoding: Bool = true
   ) -> AsyncThrowingStream<LocalModelRunnerEvent, Error> {
-    AsyncThrowingStream { continuation in
-      let generationTask = Task {
-        do {
-          try await generate(
-            messages: messages,
-            maximumTokens: maximumTokens,
-            temperature: temperature,
-            topP: topP,
-            stop: stop,
-            tools: tools,
-            enablePromptCache: enablePromptCache,
-            enableSpeculativeDecoding: enableSpeculativeDecoding
-          ) {
-            continuation.yield($0)
+    let lagunaFastPaths = LagunaDecodeFastPathSelection.resolve(
+      engine: engine,
+      compiledBlockTailOverride: LagunaRuntimeTuning.useCompiledBlockTail,
+      fusedRouterTopKOverride: LagunaRuntimeTuning.useFusedRouterTopK)
+    return AsyncThrowingStream { continuation in
+      let generationTask = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(
+        lagunaFastPaths.useCompiledBlockTail
+      ) {
+        LagunaRuntimeTuning.$useFusedRouterTopK.withValue(
+          lagunaFastPaths.useFusedRouterTopK
+        ) {
+          Task {
+            do {
+              try await generate(
+                messages: messages,
+                maximumTokens: maximumTokens,
+                temperature: temperature,
+                topP: topP,
+                stop: stop,
+                tools: tools,
+                enablePromptCache: enablePromptCache,
+                enableSpeculativeDecoding: enableSpeculativeDecoding
+              ) {
+                continuation.yield($0)
+              }
+              continuation.finish()
+            } catch {
+              continuation.finish(throwing: error)
+            }
           }
-          continuation.finish()
-        } catch {
-          continuation.finish(throwing: error)
         }
       }
       continuation.onTermination = { _ in generationTask.cancel() }

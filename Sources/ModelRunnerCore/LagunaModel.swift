@@ -18,8 +18,11 @@ import MLXNN
 public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true
   @TaskLocal public static var useCompiledMoEFusion = true
-  @TaskLocal public static var useCompiledBlockTail = false
-  @TaskLocal public static var useFusedRouterTopK = false
+  // `nil` lets LocalModelRunner select the Metal-only production default.
+  // Tests and the same-loaded benchmark use explicit values as scoped A/B
+  // overrides, including an explicit false control.
+  @TaskLocal public static var useCompiledBlockTail: Bool? = nil
+  @TaskLocal public static var useFusedRouterTopK: Bool? = nil
 }
 
 enum LagunaCompiledBlockTailEligibility {
@@ -835,8 +838,8 @@ public final class LagunaModelInner: Module {
     var hidden = embedTokens(inputs)
     let useCompiledMoEFusion = LagunaRuntimeTuning.useCompiledMoEFusion
     let useCompiledAttentionGate = LagunaRuntimeTuning.useCompiledAttentionGate
-    let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail
-    let useFusedRouterTopK = LagunaRuntimeTuning.useFusedRouterTopK
+    let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail ?? false
+    let useFusedRouterTopK = LagunaRuntimeTuning.useFusedRouterTopK ?? false
     let capturesHiddenStates = !captureLayerIDs.isEmpty
     var captured = [MLXArray]()
     captured.reserveCapacity(captureLayerIDs.count)

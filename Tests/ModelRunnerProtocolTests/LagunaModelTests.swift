@@ -140,6 +140,34 @@ struct LagunaModelTests {
     #expect(!allows(useCompiledMoEFusion: false))
   }
 
+  @Test("Production Laguna decode fast paths are Metal-only and remain overridable")
+  func productionDecodeFastPathSelection() {
+    #expect(
+      LagunaDecodeFastPathSelection.resolve(
+        engine: .metal,
+        compiledBlockTailOverride: nil,
+        fusedRouterTopKOverride: nil)
+        == LagunaDecodeFastPathSelection(
+          useCompiledBlockTail: true,
+          useFusedRouterTopK: true))
+    #expect(
+      LagunaDecodeFastPathSelection.resolve(
+        engine: .cpu,
+        compiledBlockTailOverride: nil,
+        fusedRouterTopKOverride: nil)
+        == LagunaDecodeFastPathSelection(
+          useCompiledBlockTail: false,
+          useFusedRouterTopK: false))
+    #expect(
+      LagunaDecodeFastPathSelection.resolve(
+        engine: .cuda,
+        compiledBlockTailOverride: true,
+        fusedRouterTopKOverride: false)
+        == LagunaDecodeFastPathSelection(
+          useCompiledBlockTail: true,
+          useFusedRouterTopK: false))
+  }
+
   @Test("Compiled block tail preserves cached one-token decode logits")
   func compiledBlockTailPreservesCachedDecodeLogits() throws {
     let configuration = try decodeConfiguration()

@@ -185,8 +185,8 @@ private struct GenerationMode {
   var useDFlash: Bool
   var useLagunaFusion: Bool
   var useCompiledAttentionGate: Bool
-  var useCompiledBlockTail = false
-  var useFusedRouterTopK = false
+  var useCompiledBlockTail: Bool? = nil
+  var useFusedRouterTopK: Bool? = nil
   var usePromptCache = true
 }
 
@@ -449,30 +449,36 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       useCompiledAttentionGate: true)
     let targetOnlyMode = GenerationMode(
       label: "target_only", useDFlash: false, useLagunaFusion: true,
-      useCompiledAttentionGate: true)
+      useCompiledAttentionGate: true, useCompiledBlockTail: false,
+      useFusedRouterTopK: false)
     let dflashMode = GenerationMode(
       label: "dflash", useDFlash: true, useLagunaFusion: true,
-      useCompiledAttentionGate: true)
+      useCompiledAttentionGate: true, useCompiledBlockTail: false,
+      useFusedRouterTopK: false)
     let fusionOffMode = GenerationMode(
       label: "laguna_fusion_off", useDFlash: false, useLagunaFusion: false,
-      useCompiledAttentionGate: true)
+      useCompiledAttentionGate: true, useCompiledBlockTail: false,
+      useFusedRouterTopK: false)
     let fusionOnMode = GenerationMode(
       label: "laguna_fusion_on", useDFlash: false, useLagunaFusion: true,
-      useCompiledAttentionGate: true)
+      useCompiledAttentionGate: true, useCompiledBlockTail: false,
+      useFusedRouterTopK: false)
     let attentionGateEagerMode = GenerationMode(
       label: "laguna_attention_gate_eager", useDFlash: false,
-      useLagunaFusion: true, useCompiledAttentionGate: false)
+      useLagunaFusion: true, useCompiledAttentionGate: false,
+      useCompiledBlockTail: false, useFusedRouterTopK: false)
     let attentionGateCompiledMode = GenerationMode(
       label: "laguna_attention_gate_compiled", useDFlash: false,
-      useLagunaFusion: true, useCompiledAttentionGate: true)
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: false, useFusedRouterTopK: false)
     let blockTailEagerMode = GenerationMode(
       label: "laguna_block_tail_eager", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
-      useCompiledBlockTail: false)
+      useCompiledBlockTail: false, useFusedRouterTopK: false)
     let blockTailCompiledMode = GenerationMode(
       label: "laguna_block_tail_compiled", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
-      useCompiledBlockTail: true)
+      useCompiledBlockTail: true, useFusedRouterTopK: false)
     let routerTopKLegacyMode = GenerationMode(
       label: "laguna_router_topk_legacy", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
