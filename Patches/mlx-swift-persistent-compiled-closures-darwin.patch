@@ -1,0 +1,154 @@
+diff --git a/Source/MLX/Transforms+Compile.swift b/Source/MLX/Transforms+Compile.swift
+index c9616f7..4016239 100644
+--- a/Source/MLX/Transforms+Compile.swift
++++ b/Source/MLX/Transforms+Compile.swift
+@@ -3,6 +3,50 @@
+ import Cmlx
+ import Foundation
+ 
++nonisolated(unsafe) private var persistentCompiledClosuresFlag = false
++
++/// Enable or disable persistent C closure handles for stateless compiled functions.
++///
++/// The experimental fast path is process-global and disabled by default. Compiled
++/// functions with observed input or output state always retain the existing transient
++/// wrapper path.
++public func setPersistentCompiledClosuresEnabled(_ enabled: Bool) {
++    withEvalLock {
++        persistentCompiledClosuresFlag = enabled
++    }
++}
++
++/// Return whether persistent stateless compiled closure handles are enabled.
++public func persistentCompiledClosuresEnabled() -> Bool {
++    withEvalLock {
++        persistentCompiledClosuresFlag
++    }
++}
++
++/// Read the flag without recursively acquiring `evalLock` on the compiled hot path.
++///
++/// - Precondition: `evalLock` is held by the caller.
++@inline(__always)
++private func persistentCompiledClosuresEnabledAssumingEvalLock() -> Bool {
++    #if DEBUG
++        EvalLockOwnership.requireHeldByCurrentThread(
++            "the persistent compiled closure flag was read without evalLock")
++    #endif
++    return persistentCompiledClosuresFlag
++}
++
++private final class OwnedMLXClosure: @unchecked Sendable {
++    let handle: mlx_closure
++
++    init(_ handle: mlx_closure) {
++        self.handle = handle
++    }
++
++    deinit {
++        _ = mlx_closure_free(handle)
++    }
++}
++
+ // Note: this is all immutable state -- the `id` property is only set at init time
+ final class CompiledFunction: @unchecked (Sendable) {
+ 
+@@ -27,6 +71,10 @@ final class CompiledFunction: @unchecked (Sendable) {
+ 
+     let shapeless: Bool
+ 
++    /// Ollama-style compiled handle retained for this stateless function.
++    /// Access is serialized by `evalLock`.
++    private var persistentCompiledClosure: OwnedMLXClosure?
++
+     init(
+         inputs: [any Updatable], outputs: [any Updatable], shapeless: Bool,
+         _ f: @escaping ([MLXArray]) -> [MLXArray]
+@@ -38,6 +86,17 @@ final class CompiledFunction: @unchecked (Sendable) {
+         self.id = UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+     }
+ 
++    #if DEBUG
++        var hasPersistentCompiledClosureForTesting: Bool {
++            persistentCompiledClosure != nil
++        }
++
++        var persistentCompiledClosureIdentityForTesting: UInt? {
++            guard let ctx = persistentCompiledClosure?.handle.ctx else { return nil }
++            return UInt(bitPattern: ctx)
++        }
++    #endif
++
+     /// Remove the compiled structure from the back end.
+     ///
+     /// ### Why this takes `evalLock`
+@@ -88,6 +147,10 @@ final class CompiledFunction: @unchecked (Sendable) {
+     deinit {
+         let functionID = id!
+         withEvalLock {
++            // The public mlx_compile handle owns its callback payload and cache id.
++            // Release it while evaluation is serialized, before erasing the separate
++            // transient detail-compile cache entry keyed by this object's address.
++            persistentCompiledClosure = nil
+             #if DEBUG
+                 // Trivially true two lines below the acquisition -- it is here to
+                 // catch a future change that moves the erase back out from under
+@@ -176,6 +239,12 @@ final class CompiledFunction: @unchecked (Sendable) {
+     ///   too unless this function has no observed state; see ``call(_:)``,
+     ///   which is the only caller.
+     func innerCall(_ arguments: [MLXArray]) -> [MLXArray] {
++        if inputs.isEmpty && outputs.isEmpty
++            && persistentCompiledClosuresEnabledAssumingEvalLock()
++        {
++            return persistentStatelessCall(arguments)
++        }
++
+         let stateInputs = inputs.flatMap { $0.innerState() }
+         let argumentsCount = arguments.count
+ 
+@@ -263,6 +332,45 @@ final class CompiledFunction: @unchecked (Sendable) {
+         let results = Array(resultsPlusStateOutput.prefix(resultLength))
+         return results
+     }
++
++    /// Apply the one persistent public-compile handle used only by stateless functions.
++    /// `call(_:)` holds `evalLock`, so initialization and application are serialized.
++    private func persistentStatelessCall(_ arguments: [MLXArray]) -> [MLXArray] {
++        guard let compiled = persistentCompiledClosureHandle() else { return [] }
++
++        let inputVector = new_mlx_vector_array(arguments)
++        defer { mlx_vector_array_free(inputVector) }
++
++        var resultVector = mlx_vector_array_new()
++        let applyStatus = mlx_closure_apply(&resultVector, compiled.handle, inputVector)
++        defer { mlx_vector_array_free(resultVector) }
++
++        guard applyStatus == 0 else { return [] }
++        return mlx_vector_array_values(resultVector)
++    }
++
++    private func persistentCompiledClosureHandle() -> OwnedMLXClosure? {
++        if let persistentCompiledClosure { return persistentCompiledClosure }
++
++        // Copy only the user's stateless body. Retaining `inner(tracers:)` from the
++        // transient path would capture this CompiledFunction and create a cycle.
++        let body = f
++        let source = new_mlx_closure { tracers in body(tracers) }
++        defer { mlx_closure_free(source) }
++
++        var candidate = mlx_closure_new()
++        let compileStatus = mlx_compile(&candidate, source, shapeless)
++        guard compileStatus == 0 else {
++            mlx_closure_free(candidate)
++            return nil
++        }
++
++        // Store before the first apply so a cold trace that enters another compiled
++        // function always observes a fully owned handle.
++        let owned = OwnedMLXClosure(candidate)
++        persistentCompiledClosure = owned
++        return owned
++    }
+ }
+ 
+ /// Returns a compiled function that produces the same output as `f()`.

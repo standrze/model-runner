@@ -127,6 +127,24 @@ private struct LagunaBlockTailABComparison: Encodable {
   }
 }
 
+private struct PersistentCompiledClosuresABComparison: Encodable {
+  var trialsPerMode: Int
+  var transientMedianDecodeTokensPerSecond: Double
+  var persistentMedianDecodeTokensPerSecond: Double
+  var persistentSpeedupPercent: Double
+  var outputsMatchExactly: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case trialsPerMode = "trials_per_mode"
+    case transientMedianDecodeTokensPerSecond =
+      "transient_median_decode_tokens_per_second"
+    case persistentMedianDecodeTokensPerSecond =
+      "persistent_median_decode_tokens_per_second"
+    case persistentSpeedupPercent = "persistent_speedup_percent"
+    case outputsMatchExactly = "outputs_match_exactly"
+  }
+}
+
 private struct PromptCacheComparison: Encodable {
   var trialsPerMode: Int
   var cachedMedianTimeToFirstTokenMilliseconds: Double
@@ -168,6 +186,7 @@ private struct GenerationMode {
   var useLagunaFusion: Bool
   var useCompiledAttentionGate: Bool
   var useCompiledBlockTail = false
+  var usePersistentCompiledClosures = false
   var usePromptCache = true
 }
 
@@ -190,6 +209,7 @@ private struct RuntimeBenchmarkReport: Encodable {
   var lagunaFusionABComparison: LagunaFusionABComparison?
   var lagunaAttentionGateABComparison: LagunaAttentionGateABComparison?
   var lagunaBlockTailABComparison: LagunaBlockTailABComparison?
+  var persistentCompiledClosuresABComparison: PersistentCompiledClosuresABComparison?
   var promptCacheComparison: PromptCacheComparison?
   var warmups: [RecordedTrial]
   var trials: [RecordedTrial]
@@ -210,6 +230,8 @@ private struct RuntimeBenchmarkReport: Encodable {
     case lagunaFusionABComparison = "laguna_fusion_ab_comparison"
     case lagunaAttentionGateABComparison = "laguna_attention_gate_ab_comparison"
     case lagunaBlockTailABComparison = "laguna_block_tail_ab_comparison"
+    case persistentCompiledClosuresABComparison =
+      "persistent_compiled_closures_ab_comparison"
     case promptCacheComparison = "prompt_cache_comparison"
   }
 }
@@ -296,6 +318,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
   var lagunaBlockTailAB = false
 
   @Flag(
+    name: .customLong("persistent-compiled-closures-ab"),
+    help:
+      "Alternate transient and persistent stateless MLX compiled closures on one loaded Q4 Laguna model; both arms use compiled MoE, attention gates, and block tails."
+  )
+  var persistentCompiledClosuresAB = false
+
+  @Flag(
     name: .customLong("prompt-cache"),
     help:
       "Measure a Laguna sibling branch restored from the completed-prefix LRU versus a forced-cold replay; reports TTFT and cache/prefill token counts, not decode speedup."
@@ -355,21 +384,30 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       throw ValidationError(
         "--laguna-block-tail-ab cannot be combined with --dflash-model.")
     }
+    if persistentCompiledClosuresAB, dflashModel != nil {
+      throw ValidationError(
+        "--persistent-compiled-closures-ab cannot be combined with --dflash-model.")
+    }
     if promptCache, dflashModel != nil {
       throw ValidationError("--prompt-cache cannot be combined with --dflash-model.")
     }
     let exclusiveModes = [
-      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB, promptCache,
+      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB,
+      persistentCompiledClosuresAB, promptCache,
     ].filter { $0 }.count
     if exclusiveModes > 1 {
       throw ValidationError(
-        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, and --prompt-cache are mutually exclusive."
+        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, --persistent-compiled-closures-ab, and --prompt-cache are mutually exclusive."
       )
     }
   }
 
   mutating func run() async throws {
-    defer { clearModelRunnerMLXStreams() }
+    setModelRunnerPersistentCompiledClosuresEnabled(false)
+    defer {
+      setModelRunnerPersistentCompiledClosuresEnabled(false)
+      clearModelRunnerMLXStreams()
+    }
 
     let modelURL = URL(fileURLWithPath: model).standardizedFileURL
     let outputURL = URL(fileURLWithPath: output).standardizedFileURL
@@ -381,6 +419,9 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     }
     guard !FileManager.default.fileExists(atPath: outputURL.path) else {
       throw BenchmarkError.invalidInput("output already exists: \(outputURL.path)")
+    }
+    if persistentCompiledClosuresAB {
+      try validateQ4LagunaCheckpoint(modelURL)
     }
     let requestedEngine: ModelEngine
     do {
@@ -397,6 +438,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       dflashModelPath: dflashModel,
       dflashBlockSize: dflashBlockSize
     )
+    if persistentCompiledClosuresAB, runner.engine != .metal {
+      throw BenchmarkError.invalidInput(
+        "--persistent-compiled-closures-ab requires the Metal engine; resolved \(runner.engine.rawValue)."
+      )
+    }
     let messages = [OpenAIMessage(role: "user", content: prompt)]
     var warmupRecords = [RecordedTrial]()
     var measuredRecords = [RecordedTrial]()
@@ -432,6 +478,14 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       label: "laguna_block_tail_compiled", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
       useCompiledBlockTail: true)
+    let persistentClosuresOffMode = GenerationMode(
+      label: "persistent_compiled_closures_off", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, usePersistentCompiledClosures: false)
+    let persistentClosuresOnMode = GenerationMode(
+      label: "persistent_compiled_closures_on", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, usePersistentCompiledClosures: true)
 
     if promptCache {
       for warmupIndex in 0..<warmups {
@@ -466,6 +520,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         warmupModes = [attentionGateEagerMode, attentionGateCompiledMode]
       } else if lagunaBlockTailAB {
         warmupModes = [blockTailEagerMode, blockTailCompiledMode]
+      } else if persistentCompiledClosuresAB {
+        warmupModes = [persistentClosuresOffMode, persistentClosuresOnMode]
       } else {
         warmupModes = [ordinaryMode]
       }
@@ -506,6 +562,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
             trialIndex.isMultiple(of: 2)
             ? [blockTailEagerMode, blockTailCompiledMode]
             : [blockTailCompiledMode, blockTailEagerMode]
+        } else if persistentCompiledClosuresAB {
+          measuredModes =
+            trialIndex.isMultiple(of: 2)
+            ? [persistentClosuresOffMode, persistentClosuresOnMode]
+            : [persistentClosuresOnMode, persistentClosuresOffMode]
         } else {
           measuredModes = [ordinaryMode]
         }
@@ -542,6 +603,12 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     let blockTailCompiledRecords = measuredRecords.filter {
       $0.mode == "laguna_block_tail_compiled"
     }
+    let persistentClosuresOffRecords = measuredRecords.filter {
+      $0.mode == "persistent_compiled_closures_off"
+    }
+    let persistentClosuresOnRecords = measuredRecords.filter {
+      $0.mode == "persistent_compiled_closures_on"
+    }
     let promptCacheCachedRecords = measuredRecords.filter {
       $0.mode == "prompt_cache_cached"
     }
@@ -557,6 +624,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       primaryRecords = attentionGateCompiledRecords
     } else if lagunaBlockTailAB {
       primaryRecords = blockTailCompiledRecords
+    } else if persistentCompiledClosuresAB {
+      primaryRecords = persistentClosuresOnRecords
     } else if promptCache {
       primaryRecords = []
     } else {
@@ -645,6 +714,27 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else {
       lagunaBlockTailComparison = nil
     }
+    let persistentCompiledClosuresComparison: PersistentCompiledClosuresABComparison?
+    if persistentCompiledClosuresAB {
+      let transientMedian = median(
+        persistentClosuresOffRecords.map(\.metrics.tokensPerSecond))
+      let persistentMedian = median(
+        persistentClosuresOnRecords.map(\.metrics.tokensPerSecond))
+      let referenceContent = persistentClosuresOffRecords.first?.content
+      let outputsMatch =
+        referenceContent != nil
+        && persistentClosuresOffRecords.allSatisfy { $0.content == referenceContent }
+        && persistentClosuresOnRecords.allSatisfy { $0.content == referenceContent }
+      persistentCompiledClosuresComparison = PersistentCompiledClosuresABComparison(
+        trialsPerMode: trials,
+        transientMedianDecodeTokensPerSecond: transientMedian,
+        persistentMedianDecodeTokensPerSecond: persistentMedian,
+        persistentSpeedupPercent: 100 * (persistentMedian / transientMedian - 1),
+        outputsMatchExactly: outputsMatch
+      )
+    } else {
+      persistentCompiledClosuresComparison = nil
+    }
     let promptCacheModeComparison: PromptCacheComparison?
     if promptCache {
       let cachedTTFT = median(
@@ -694,6 +784,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       lagunaFusionABComparison: lagunaFusionComparison,
       lagunaAttentionGateABComparison: lagunaAttentionGateComparison,
       lagunaBlockTailABComparison: lagunaBlockTailComparison,
+      persistentCompiledClosuresABComparison: persistentCompiledClosuresComparison,
       promptCacheComparison: promptCacheModeComparison,
       warmups: warmupRecords,
       trials: measuredRecords
@@ -737,10 +828,22 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else if let comparison = lagunaBlockTailComparison {
       print(
         String(
-          format: "A/B median: eager block tail %.2f tok/s, compiled block tail %.2f tok/s (%+.2f%%)",
+          format:
+            "A/B median: eager block tail %.2f tok/s, compiled block tail %.2f tok/s (%+.2f%%)",
           comparison.eagerMedianDecodeTokensPerSecond,
           comparison.compiledMedianDecodeTokensPerSecond,
           comparison.compiledSpeedupPercent
+        )
+      )
+      print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
+    } else if let comparison = persistentCompiledClosuresComparison {
+      print(
+        String(
+          format:
+            "A/B median: transient closures %.2f tok/s, persistent closures %.2f tok/s (%+.2f%%)",
+          comparison.transientMedianDecodeTokensPerSecond,
+          comparison.persistentMedianDecodeTokensPerSecond,
+          comparison.persistentSpeedupPercent
         )
       )
       print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
@@ -774,12 +877,44 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     print("Wrote \(outputURL.path)")
   }
 
+  private func validateQ4LagunaCheckpoint(_ modelURL: URL) throws {
+    let configURL = modelURL.appendingPathComponent("config.json")
+    let data: Data
+    do {
+      data = try Data(contentsOf: configURL)
+    } catch {
+      throw BenchmarkError.invalidInput(
+        "--persistent-compiled-closures-ab requires a readable config.json: \(error.localizedDescription)"
+      )
+    }
+    guard
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      object["model_type"] as? String == "laguna"
+    else {
+      throw BenchmarkError.invalidInput(
+        "--persistent-compiled-closures-ab requires a native Laguna checkpoint."
+      )
+    }
+    guard
+      let quantization = object["quantization"] as? [String: Any],
+      let bits = quantization["bits"] as? NSNumber,
+      bits.intValue == 4
+    else {
+      throw BenchmarkError.invalidInput(
+        "--persistent-compiled-closures-ab requires a Q4 checkpoint (quantization.bits == 4)."
+      )
+    }
+  }
+
   private func runGeneration(
     runner: LocalModelRunner,
     messages: [OpenAIMessage],
     sequence: Int,
     mode: GenerationMode
   ) async throws -> RecordedTrial {
+    setModelRunnerPersistentCompiledClosuresEnabled(mode.usePersistentCompiledClosures)
+    defer { setModelRunnerPersistentCompiledClosuresEnabled(false) }
+
     let clock = ContinuousClock()
     let startedAt = clock.now
     let events = await LagunaRuntimeTuning.$useCompiledMoEFusion.withValue(
@@ -843,20 +978,22 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     seedMode.label = "prompt_cache_seed"
     let seed = try await runGeneration(
       runner: runner, messages: seedMessages, sequence: sequence, mode: seedMode)
-    let continuationMessages = seedMessages + [
-      OpenAIMessage(role: "assistant", content: seed.content),
-      OpenAIMessage(role: "user", content: continuationPrompt),
-    ]
+    let continuationMessages =
+      seedMessages + [
+        OpenAIMessage(role: "assistant", content: seed.content),
+        OpenAIMessage(role: "user", content: continuationPrompt),
+      ]
     // Move the hot session down a sibling branch first. The measured cached
     // continuation must then come from the immutable completed-prefix LRU,
     // rather than the zero-copy linear hot path.
-    let displacementMessages = seedMessages + [
-      OpenAIMessage(role: "assistant", content: seed.content),
-      OpenAIMessage(
-        role: "user",
-        content: continuationPrompt + "\n\nBegin instead with memory reclamation."
-      ),
-    ]
+    let displacementMessages =
+      seedMessages + [
+        OpenAIMessage(role: "assistant", content: seed.content),
+        OpenAIMessage(
+          role: "user",
+          content: continuationPrompt + "\n\nBegin instead with memory reclamation."
+        ),
+      ]
     var displacementMode = mode
     displacementMode.label = "prompt_cache_displacement"
     let displacement = try await runGeneration(
@@ -925,7 +1062,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       format: "%.2f tok/s, TTFT %.2f ms", metrics.tokensPerSecond,
       record.timeToFirstTokenMilliseconds)
     if metrics.cachedPromptTokenCount > 0 {
-      summary += ", prompt \(metrics.cachedPromptTokenCount) cached/"
+      summary +=
+        ", prompt \(metrics.cachedPromptTokenCount) cached/"
         + "\(metrics.prefilledPromptTokenCount) prefilled"
     }
     if let proposed = metrics.proposedDraftTokens,
