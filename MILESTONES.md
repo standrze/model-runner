@@ -32,12 +32,15 @@ a tag.
 - Candidate promotion gate: correct output, at least `+1%`, and absolute drift
   no greater than `1%` in controlled forward and reverse brackets
 
-The clean incremental ByteLevel branch is the best measured correct candidate.
-Its definitive final-binary v2 order-balanced result is `+2.466914598390%` and
-the v3 confirmation is `+2.213684635318%`. It is not accepted yet because the
-forward control endpoint drifts were `-1.002193262830%` and
-`-1.011697931239%`, just outside the strict stability boundary. Raw evidence is
-in `benchmark-results/incremental-final-binary-20260830/`.
+The compiled Laguna block-tail experiment is the highest correct measured arm
+so far at `177.499062770142 tok/s`. Its same-loaded alternating A/B effect is
+`+0.935598000375%`, which misses the `+1%` promotion gate and remains
+`1.151183925404%` below Ollama, so it is preserved but not promoted. The clean
+incremental ByteLevel branch remains its source baseline; its definitive
+final-binary v2 order-balanced result is `+2.466914598390%`, but its forward
+control drift remains just outside the strict stability boundary. Raw evidence
+is under `benchmark-results/incremental-final-binary-20260830/` and
+`benchmark-results/laguna-compiled-block-tail-20260830/`.
 
 ## Performance milestone index
 
@@ -61,6 +64,8 @@ in `benchmark-results/incremental-final-binary-20260830/`.
 | `consolidated-decoder-fast-path-measured-v1` | `2f889d5` | Measured incremental plus in-place candidate | `+0.127683%` balanced; performance-neutral, not promoted |
 | `incremental-fast-path-clean-v1` | `f613995` | Clean incremental-only source boundary | Correctness and patch verification passed |
 | `incremental-fast-path-final-binary-measured-v1` | this commit | Definitive same-final-binary measurement | `+2.466914598390%` v2 balanced; `+2.213684635318%` confirmation; stability recheck required |
+| `laguna-compiled-block-tail-candidate-v1` | `b103114` | Guarded decode-only compiled tail | Nine focused Laguna tests passed |
+| `laguna-compiled-block-tail-measured-v1` | this commit | Same-loaded alternating A/B evidence | `177.499062770142 tok/s`, `+0.935598000375%`; correct but below gate and Ollama |
 
 ## Clean incremental candidate
 
@@ -81,6 +86,27 @@ All 72 definitive measured generations produced correct, identical 128-token
 outputs. The reverse bracket passed the drift gate and every candidate block
 was stable. Accepted `main` is deliberately unchanged pending a stable forward
 control bracket.
+
+## Compiled Laguna block-tail candidate
+
+Branch `codex/compiled-tail-fast-path` adds one guarded compiled graph per
+Laguna decoder layer for the post-attention gate, output projection, residual,
+post-attention normalization, and dense or sparse MLP tail. It is off by
+default outside its explicit runtime benchmark A/B mode.
+
+- Source tag: `laguna-compiled-block-tail-candidate-v1`
+- Candidate release binary SHA-256:
+  `2180fc576de2ba066b7d471d4d01fc25a58c5a04d5d1141b75ff6e138198217f`
+- Shared metallib SHA-256:
+  `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`
+- Same-loaded median: eager `175.853778336442 tok/s`, compiled
+  `177.499062770142 tok/s`
+- Effect: `+0.935598000375%`
+- Gap to Ollama: `2.067137229858 tok/s` (`1.151183925404%`)
+
+All measured outputs match exactly. This candidate is a rollback boundary and
+an input to the next attention-side experiment, not an accepted production
+change.
 
 ## Standalone Swift server
 
