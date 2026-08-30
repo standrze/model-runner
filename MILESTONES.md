@@ -42,6 +42,19 @@ control drift remains just outside the strict stability boundary. Raw evidence
 is under `benchmark-results/incremental-final-binary-20260830/` and
 `benchmark-results/laguna-compiled-block-tail-20260830/`.
 
+The subsequent fused Laguna QKVG projection was rejected. Its same-loaded
+screening arm measured `-0.171863260430%`, and the 128-token legacy and fused
+streams diverged after 304 output characters. Raw failure evidence is under
+`benchmark-results/laguna-fused-qkvg-20260830/`; no accepted branch changed.
+
+The decode-only compiled attention prelude is numerically correct when its
+graph stops before RoPE, but performance-neutral. Its same-loaded median effect
+was `+0.207863954995%`, while the order-balanced geometric effect was only
+`+0.034787554331%`. Heavy unrelated host activity invalidates its absolute rate
+as an Ollama comparison, and the relative effect misses the `+1%` gate by a
+wide margin. Raw evidence is under
+`benchmark-results/laguna-compiled-attention-prelude-20260830/`.
+
 ## Performance milestone index
 
 | Tag | Commit | Status | Result or disposition |
@@ -63,9 +76,13 @@ is under `benchmark-results/incremental-final-binary-20260830/` and
 | `stable-string-cache-measured-v1` | `cc51e45` | Measured stable-string cache | `-0.4698%` balanced; rejected |
 | `consolidated-decoder-fast-path-measured-v1` | `2f889d5` | Measured incremental plus in-place candidate | `+0.127683%` balanced; performance-neutral, not promoted |
 | `incremental-fast-path-clean-v1` | `f613995` | Clean incremental-only source boundary | Correctness and patch verification passed |
-| `incremental-fast-path-final-binary-measured-v1` | this commit | Definitive same-final-binary measurement | `+2.466914598390%` v2 balanced; `+2.213684635318%` confirmation; stability recheck required |
+| `incremental-fast-path-final-binary-measured-v1` | `c5ca138` | Definitive same-final-binary measurement | `+2.466914598390%` v2 balanced; `+2.213684635318%` confirmation; stability recheck required |
 | `laguna-compiled-block-tail-candidate-v1` | `b103114` | Guarded decode-only compiled tail | Nine focused Laguna tests passed |
-| `laguna-compiled-block-tail-measured-v1` | this commit | Same-loaded alternating A/B evidence | `177.499062770142 tok/s`, `+0.935598000375%`; correct but below gate and Ollama |
+| `laguna-compiled-block-tail-measured-v1` | `9cbdd94` | Same-loaded alternating A/B evidence | `177.499062770142 tok/s`, `+0.935598000375%`; correct but below gate and Ollama |
+| `laguna-fused-qkvg-candidate-v1` | `f6feaf2` | Guarded fused Q/K/V/gate projection | Short-horizon tests passed; Release screening required |
+| `laguna-fused-qkvg-rejected-v1` | `62d7ea7` | Same-loaded failure evidence | `-0.171863260430%`; 128-token streams diverged; rejected |
+| `laguna-compiled-attention-prelude-candidate-v1` | `6949c23` | Separate-width decode-only compiled prelude | Eleven focused Laguna tests and real Q4 smoke passed exactly |
+| `laguna-compiled-attention-prelude-measured-v1` | this commit | Same-loaded alternating A/B evidence | `+0.034787554331%` order-balanced; performance-neutral, not promoted |
 
 ## Clean incremental candidate
 
@@ -107,6 +124,52 @@ default outside its explicit runtime benchmark A/B mode.
 All measured outputs match exactly. This candidate is a rollback boundary and
 an input to the next attention-side experiment, not an accepted production
 change.
+
+## Rejected fused Laguna QKVG candidate
+
+Branch `codex/fused-qkvg-fast-path` retains a diagnostic-only QKVG projection
+on top of the compiled block-tail milestone. Both tensor layouts coexist so a
+single loaded checkpoint can alternate legacy and fused execution.
+
+- Source tag: `laguna-fused-qkvg-candidate-v1`
+- Candidate release binary SHA-256:
+  `09bfa82661f9f16755ce5538b51174543b93ec021527f92c6f296baf184c9f0f`
+- Shared metallib SHA-256:
+  `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`
+- Same-loaded median: legacy `168.565299333401 tok/s`, fused
+  `168.275597514012 tok/s`
+- Effect: `-0.171863260430%`
+
+The absolute rates are not a valid Ollama comparison because unrelated host
+workers were active. The candidate is nevertheless decisively rejected: the
+relative effect is negative and the deterministic 128-token streams are not
+identical. This rollback boundary exists to prevent the failed path from being
+rediscovered or accidentally consolidated.
+
+## Performance-neutral compiled attention prelude
+
+Branch `codex/compiled-attention-prelude-fast-path` starts from the measured
+compiled block-tail milestone. It compiles input normalization plus separate
+Q/K/V projection, reshape, Q/K normalization, and transpose operations only
+during batch-one, one-token cached decode. Projection widths remain unchanged;
+RoPE, cache mutation, SDPA, the attention gate, and the compiled block tail
+retain their existing paths.
+
+- Source tag: `laguna-compiled-attention-prelude-candidate-v1`
+- Candidate release binary SHA-256:
+  `037115f053defe73fa7553f352481a81e53ff999257381be8a845609e74d6534`
+- Shared metallib SHA-256:
+  `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`
+- Same-loaded median: eager `165.035273280416 tok/s`, compiled
+  `165.378322126595 tok/s`
+- Serialized median effect: `+0.207863954995%`
+- Order-balanced geometric effect: `+0.034787554331%`
+
+All measured outputs match exactly, and all six paired effects fall between
+`-0.869039089689%` and `+0.805212826617%`. The absolute rates are invalid for
+an Ollama comparison because `mediaanalysisd` consumed roughly 128-132% CPU
+during the campaign. The near-zero alternating relative result is sufficient
+to classify the candidate as neutral and keep it out of production.
 
 ## Standalone Swift server
 
