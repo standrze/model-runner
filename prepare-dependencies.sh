@@ -13,6 +13,7 @@ MLX_SWIFT_MLX32_LINK_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-mlx32-cuda-link.patc
 MLX_SWIFT_CROSS_THREAD_STREAM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-cross-thread-stream.patch"
 MLX_SWIFT_CLEAR_STREAMS_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-clear-streams.patch"
 MLX_SWIFT_EXISTING_DEFAULT_STREAM_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-existing-default-stream.patch"
+MLX_SWIFT_DIRECT_SLICE_UPDATE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-direct-slice-update.patch"
 MLX_SWIFT_DARWIN_EXPECTED_REVISION="72f3c3ad8aeee39bfc94f8fbeb446cac89e3a798"
 MLX_SWIFT_LINUX_EXPECTED_REVISION="2d2724006b62855c6c2a71df633baf4ee4ad8a0f"
 MLX_SOURCE_CHECKOUT="$MLX_SWIFT_CHECKOUT/Source/Cmlx/mlx"
@@ -36,6 +37,7 @@ MLX_SWIFT_LM_MTP_PROMPT_WINDOW_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp-pro
 MLX_SWIFT_LM_MTP_DECODE_SCHEDULING_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp-decode-scheduling.patch"
 MLX_SWIFT_LM_MTP_FIRST_REJECTION_DIAGNOSTIC_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp-first-rejection-diagnostic.patch"
 MLX_SWIFT_LM_CHAT_SESSION_SNAPSHOT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-chat-session-snapshot.patch"
+MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-direct-kv-slice-update.patch"
 MLX_SWIFT_LM_Q4_AFFINE_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_CENTERED_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-centered-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_BIAS_REFINEMENT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-bias-refinement.patch"
@@ -245,6 +247,10 @@ apply_dependency_patch \
   "mlx-swift existing default stream API" \
   "$MLX_SWIFT_CHECKOUT" \
   "$MLX_SWIFT_EXISTING_DEFAULT_STREAM_PATCH"
+apply_dependency_patch \
+  "mlx-swift direct slice update" \
+  "$MLX_SWIFT_CHECKOUT" \
+  "$MLX_SWIFT_DIRECT_SLICE_UPDATE_PATCH"
 
 apply_dependency_patch \
   "mlx-swift-lm README warning fix" "$MLX_SWIFT_LM_CHECKOUT" "$MLX_SWIFT_LM_PATCH"
@@ -276,6 +282,10 @@ apply_dependency_patch \
   "mlx-swift-lm ChatSession in-memory snapshot" \
   "$MLX_SWIFT_LM_CHECKOUT" \
   "$MLX_SWIFT_LM_CHAT_SESSION_SNAPSHOT_PATCH"
+apply_dependency_patch \
+  "mlx-swift-lm direct KV slice update" \
+  "$MLX_SWIFT_LM_CHECKOUT" \
+  "$MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH"
 apply_dependency_patch \
   "mlx-swift-lm Q4 affine scale search" \
   "$MLX_SWIFT_LM_CHECKOUT" \

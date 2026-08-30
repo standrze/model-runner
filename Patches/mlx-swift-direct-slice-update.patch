@@ -1,0 +1,113 @@
+diff --git a/Source/MLX/MLXArray+Indexing.swift b/Source/MLX/MLXArray+Indexing.swift
+index bebaf23..68b09de 100644
+--- a/Source/MLX/MLXArray+Indexing.swift
++++ b/Source/MLX/MLXArray+Indexing.swift
+@@ -374,7 +374,7 @@ extension MLXArray {
+             }
+         }
+         set {
+-            if let result = updateSlice(src: self, operations: operations, update: newValue) {
++            if let result = MLX.updateSlice(src: self, operations: operations, update: newValue) {
+                 self._updateInternal(result)
+                 return
+             }
+@@ -832,6 +832,64 @@ func gatherND(
+ 
+ // MARK: - index set (slice)
+ 
++extension MLXArray {
++
++    /// Replace a slice using explicit bounds while preserving this array's object identity.
++    ///
++    /// This is the direct counterpart to a slice subscript assignment for callers that already
++    /// have normalized, full-rank bounds and an update with the exact slice shape. It avoids the
++    /// index-operation expansion, reshape, and broadcast work performed by the general setter.
++    /// Each bounds array must contain one entry per source dimension. Bounds must be normalized,
++    /// strides must be positive, and `update` must have the same dtype and exact slice shape.
++    /// These invariants are asserted in debug builds and forwarded directly to MLX in release
++    /// builds so this method remains suitable for latency-sensitive inner loops.
++    ///
++    /// - Parameters:
++    ///   - update: array whose shape exactly matches the selected slice
++    ///   - starts: inclusive start for each source dimension
++    ///   - ends: exclusive end for each source dimension
++    ///   - strides: stride for each source dimension
++    ///   - stream: stream or device on which to create the update
++    public func updateSlice(
++        with update: MLXArray,
++        starts: [Int32],
++        ends: [Int32],
++        strides: [Int32],
++        stream: StreamOrDevice = .default
++    ) {
++        assert(
++            starts.count == ndim && ends.count == ndim && strides.count == ndim,
++            "slice bounds must contain one entry per source dimension")
++        assert(
++            {
++                guard update.dtype == dtype else { return false }
++                for axis in 0 ..< ndim {
++                    let start = starts[axis]
++                    let end = ends[axis]
++                    let stride = strides[axis]
++                    let size = Int32(dim(axis))
++                    guard start >= 0, start <= end, end <= size, stride > 0 else {
++                        return false
++                    }
++                    let sliceSize = (end - start + stride - 1) / stride
++                    guard update.dim(axis) == Int(sliceSize) else { return false }
++                }
++                return true
++            }(),
++            "update must match the normalized slice shape and dtype")
++
++        var result = mlx_array_new()
++        mlx_slice_update(
++            &result,
++            ctx, update.ctx,
++            starts, starts.count,
++            ends, ends.count,
++            strides, strides.count,
++            stream.ctx)
++        _updateInternal(MLXArray(result))
++    }
++}
++
+ /// The result of translating index operations into `mlx_slice_update*` arguments.
+ ///
+ /// See ``sliceUpdateArguments(src:operations:update:stream:)``.
+diff --git a/Tests/MLXTests/MLXArray+IndexingTests.swift b/Tests/MLXTests/MLXArray+IndexingTests.swift
+index 68673ff..319c9c1 100644
+--- a/Tests/MLXTests/MLXArray+IndexingTests.swift
++++ b/Tests/MLXTests/MLXArray+IndexingTests.swift
+@@ -199,6 +199,30 @@ class MLXArrayIndexingTests: XCTestCase {
+         assertEqual(a, expected)
+     }
+ 
++    func testDirectSliceUpdatePreservesIdentityAndAvoidsShapeOperations() {
++        let a = MLXArray((0 ..< 20).asInt32, [2, 2, 5])
++        let identity = ObjectIdentifier(a)
++        let update = MLXArray([88, 89].asInt32, [1, 1, 2])
++
++        a.updateSlice(
++            with: update,
++            starts: [0, 1, 2],
++            ends: [1, 2, 4],
++            strides: [1, 1, 1])
++
++        XCTAssertEqual(ObjectIdentifier(a), identity)
++        let description = graphDescription([a])
++        XCTAssertTrue(description.contains("SliceUpdate"), "expected SliceUpdate in:\n\(description)")
++        XCTAssertFalse(description.contains("Broadcast"), "unexpected Broadcast in:\n\(description)")
++        XCTAssertFalse(description.contains("Reshape"), "unexpected Reshape in:\n\(description)")
++
++        let expected = MLXArray(
++            [0, 1, 2, 3, 4, 5, 6, 88, 89, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
++                .asInt32,
++            [2, 2, 5])
++        assertEqual(a, expected)
++    }
++
+     func testArrayMutateAdvanced() {
+         let a = MLXArray(0 ..< 35, [5, 7]).asType(Int32.self)
+ 
