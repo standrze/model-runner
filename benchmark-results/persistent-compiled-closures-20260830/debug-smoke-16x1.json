@@ -1,0 +1,56 @@
+{
+  "created_at" : "2026-08-30T09:59:07Z",
+  "engine" : "metal",
+  "format" : 1,
+  "measured_trials" : 2,
+  "median_decode_tokens_per_second" : 57.8293621471076,
+  "median_prompt_tokens_per_second" : 416.0172157168748,
+  "model_path" : "/Users/stephen/Documents/llm-abliteration/models/Laguna-XS-2.1-Abliterated-Q4R8-ScaleSearch-LS2",
+  "persistent_compiled_closures_ab_comparison" : {
+    "outputs_match_exactly" : true,
+    "persistent_median_decode_tokens_per_second" : 57.8293621471076,
+    "persistent_speedup_percent" : 0.6798145740904538,
+    "transient_median_decode_tokens_per_second" : 57.43888424084341,
+    "trials_per_mode" : 1
+  },
+  "prompt" : "Write a long, detailed technical tutorial about implementing a lock-free work-stealing scheduler in Swift. Continue with implementation details and code examples until the output limit; do not conclude or summarize early.",
+  "requested_tokens" : 16,
+  "served_model_name" : "runtime-benchmark",
+  "status" : "measured",
+  "trials" : [
+    {
+      "content" : "# Implementing a Lock-Free Work-Stealing Scheduler in Swift\n\n## Introduction\n\n",
+      "metrics" : {
+        "cached_prompt_token_count" : 0,
+        "generation_token_count" : 16,
+        "prefilled_prompt_token_count" : 79,
+        "prompt_token_count" : 79,
+        "prompt_tokens_per_second" : 188.08986534276232,
+        "stop_reason" : "length",
+        "tokens_per_second" : 57.43888424084341
+      },
+      "mode" : "persistent_compiled_closures_off",
+      "sequence" : 0,
+      "time_to_first_token_milliseconds" : 456.86
+    },
+    {
+      "content" : "# Implementing a Lock-Free Work-Stealing Scheduler in Swift\n\n## Introduction\n\n",
+      "metrics" : {
+        "cached_prompt_token_count" : 0,
+        "generation_token_count" : 16,
+        "prefilled_prompt_token_count" : 79,
+        "prompt_token_count" : 79,
+        "prompt_tokens_per_second" : 416.0172157168748,
+        "stop_reason" : "length",
+        "tokens_per_second" : 57.8293621471076
+      },
+      "mode" : "persistent_compiled_closures_on",
+      "sequence" : 1,
+      "time_to_first_token_milliseconds" : 192.678417
+    }
+  ],
+  "warmup_count" : 0,
+  "warmups" : [
+
+  ]
+}
