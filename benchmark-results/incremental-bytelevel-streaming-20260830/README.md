@@ -6,7 +6,7 @@ This milestone isolates incremental ByteLevel detokenization on top of accepted
 direct-KV zero-wrapper v3. It does not include the autorelease-pool candidate or
 the in-place outer token-loop decoder candidate.
 
-- Model: `Laguna-XS-2.1-MLX-Q4R8-ScaleSearch-LS2`
+- Model: `Laguna-XS-2.1-Abliterated-Q4R8-ScaleSearch-LS2`
 - Engine: Metal
 - Prompt: 79 uncached tokens
 - Generation: greedy, 128 requested tokens
