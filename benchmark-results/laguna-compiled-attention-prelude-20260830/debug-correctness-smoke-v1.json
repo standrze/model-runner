@@ -1,0 +1,56 @@
+{
+  "created_at" : "2026-08-30T08:42:00Z",
+  "engine" : "metal",
+  "format" : 1,
+  "laguna_attention_prelude_ab_comparison" : {
+    "compiled_median_decode_tokens_per_second" : 57.63709999145435,
+    "compiled_speedup_percent" : 1.688432319062949,
+    "eager_median_decode_tokens_per_second" : 56.68009494984559,
+    "outputs_match_exactly" : true,
+    "trials_per_mode" : 1
+  },
+  "measured_trials" : 2,
+  "median_decode_tokens_per_second" : 57.63709999145435,
+  "median_prompt_tokens_per_second" : 404.4600041135662,
+  "model_path" : "/Users/stephen/Documents/llm-abliteration/models/Laguna-XS-2.1-Abliterated-Q4R8-ScaleSearch-LS2",
+  "prompt" : "Write a long, detailed technical tutorial about implementing a lock-free work-stealing scheduler in Swift. Continue with implementation details and code examples until the output limit; do not conclude or summarize early.",
+  "requested_tokens" : 16,
+  "served_model_name" : "runtime-benchmark",
+  "status" : "measured",
+  "trials" : [
+    {
+      "content" : "# Implementing a Lock-Free Work-Stealing Scheduler in Swift\n\n## Introduction\n\n",
+      "metrics" : {
+        "cached_prompt_token_count" : 0,
+        "generation_token_count" : 16,
+        "prefilled_prompt_token_count" : 79,
+        "prompt_token_count" : 79,
+        "prompt_tokens_per_second" : 185.31164960636306,
+        "stop_reason" : "length",
+        "tokens_per_second" : 56.68009494984559
+      },
+      "mode" : "laguna_attention_prelude_eager",
+      "sequence" : 0,
+      "time_to_first_token_milliseconds" : 464.586708
+    },
+    {
+      "content" : "# Implementing a Lock-Free Work-Stealing Scheduler in Swift\n\n## Introduction\n\n",
+      "metrics" : {
+        "cached_prompt_token_count" : 0,
+        "generation_token_count" : 16,
+        "prefilled_prompt_token_count" : 79,
+        "prompt_token_count" : 79,
+        "prompt_tokens_per_second" : 404.4600041135662,
+        "stop_reason" : "length",
+        "tokens_per_second" : 57.63709999145435
+      },
+      "mode" : "laguna_attention_prelude_compiled",
+      "sequence" : 1,
+      "time_to_first_token_milliseconds" : 197.878416
+    }
+  ],
+  "warmup_count" : 0,
+  "warmups" : [
+
+  ]
+}
