@@ -50,6 +50,7 @@ private let formatABOnly = CommandLine.arguments.contains("--format-ab")
 private let lagunaGraphABOnly = CommandLine.arguments.contains("--laguna-graph-ab")
 private let mistralGraphABOnly = CommandLine.arguments.contains("--mistral-graph-ab")
 private let qmvSpecializationOnly = CommandLine.arguments.contains("--qmv-specialization")
+private let routerPrecisionABOnly = CommandLine.arguments.contains("--router-precision-ab")
 
 private let siluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
   shapeless: true
@@ -73,6 +74,8 @@ if scaleSearchOnly {
   benchmarkMistralGraphAB()
 } else if qmvSpecializationOnly {
   benchmarkAffineQ4QMVSpecialization()
+} else if routerPrecisionABOnly {
+  benchmarkRouterPrecisionAB()
 } else {
   MLXRandom.seed(7)
   Memory.cacheLimit = 256 * 1_024 * 1_024
@@ -160,6 +163,36 @@ if scaleSearchOnly {
     "fused_speedup\t"
       + "\(format(median(sharedGateUp.separate.queued) / median(sharedGateUp.fused.queued)))x"
   )
+}
+
+private func benchmarkRouterPrecisionAB() {
+  MLXRandom.seed(7)
+  Memory.cacheLimit = 256 * 1_024 * 1_024
+
+  let q4 = QuantizationCase(
+    name: "affine-4bit-g64", mode: .affine, groupSize: 64, bits: 4)
+  let q8 = QuantizationCase(
+    name: "affine-8bit-g64", mode: .affine, groupSize: 64, bits: 8)
+  let measurement = benchmarkDensePair(
+    q4, q8, inputDimensions: 2_048, outputDimensions: 256)
+  let q4Total = median(measurement.firstTotalMilliseconds)
+  let q8Total = median(measurement.secondTotalMilliseconds)
+  let q4Execution = median(measurement.firstExecutionMilliseconds)
+  let q8Execution = median(measurement.secondExecutionMilliseconds)
+
+  print("Laguna 2048->256 router precision Metal A/B")
+  print(
+    "warmup=\(warmupCount) queue_depth=\(queueDepth) "
+      + "queue_rounds=\(max(queueRounds, 5)) dtype=bfloat16"
+  )
+  print(
+    "workload\tq4_total_ms\tq8_total_ms\tq4_total_speedup\t"
+      + "q4_execution_ms\tq8_execution_ms\tq4_execution_speedup")
+  print(
+    "router-qmv\t\(formatPrecise(q4Total))\t\(formatPrecise(q8Total))\t"
+      + "\(formatPrecise(q8Total / q4Total))x\t\(formatPrecise(q4Execution))\t"
+      + "\(formatPrecise(q8Execution))\t"
+      + "\(formatPrecise(q8Execution / q4Execution))x")
 }
 
 private func benchmarkAffineQ4QMVSpecialization() {
@@ -1228,6 +1261,10 @@ private func median(_ values: [Double]) -> Double {
 
 private func format(_ value: Double) -> String {
   String(format: "%.3f", value)
+}
+
+private func formatPrecise(_ value: Double) -> String {
+  String(format: "%.6f", value)
 }
 
 private func integerArgument(_ name: String, defaultValue: Int) -> Int {
