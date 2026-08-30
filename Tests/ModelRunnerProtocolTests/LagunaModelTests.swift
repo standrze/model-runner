@@ -210,6 +210,103 @@ struct LagunaModelTests {
     #expect(allClose(eager, fallback, rtol: 1e-2, atol: 1e-2).item(Bool.self))
   }
 
+  @Test("Fused Laguna router exactly preserves stable top-k indices and weights")
+  func fusedRouterTopKIsExact() {
+    let logits = MLXArray(
+      (0..<256).map { index in
+        Float((index * 73) % 257 - 128) / 19
+      }
+    ).reshaped(1, 1, 256)
+    let correctionBias = MLXArray(
+      (0..<256).map { index in
+        Float((index * 29) % 31 - 15) / 1_000
+      })
+
+    for dtype: DType in [.float32, .float16, .bfloat16] {
+      let typedLogits = logits.asType(dtype)
+      let legacy = lagunaSigmoidTopK8Router(
+        typedLogits, correctionBias: correctionBias)
+      let fused = fusedLagunaSigmoidTopK8Router(
+        typedLogits, correctionBias: correctionBias)
+      eval(legacy.weights, legacy.indices, fused.weights, fused.indices)
+
+      #expect(MLX.arrayEqual(legacy.indices, fused.indices).item(Bool.self))
+      #expect(MLX.arrayEqual(legacy.weights, fused.weights).item(Bool.self))
+    }
+
+    // Every selection score ties. The legacy stable sort keeps lower expert
+    // indices first; this also covers the candidate's explicit tie-break.
+    let tiedLogits = MLXArray.zeros([1, 1, 256])
+    let tiedBias = MLXArray.zeros([256])
+    let legacyTie = lagunaSigmoidTopK8Router(
+      tiedLogits, correctionBias: tiedBias)
+    let fusedTie = fusedLagunaSigmoidTopK8Router(
+      tiedLogits, correctionBias: tiedBias)
+    eval(legacyTie.weights, legacyTie.indices, fusedTie.weights, fusedTie.indices)
+
+    #expect(MLX.arrayEqual(legacyTie.indices, fusedTie.indices).item(Bool.self))
+    #expect(MLX.arrayEqual(legacyTie.weights, fusedTie.weights).item(Bool.self))
+    #expect(fusedTie.indices.asArray(UInt32.self) == Array(0..<8).map(UInt32.init))
+
+    // sigmoid(0) + (-0.5) produces zero-valued selection keys. The kernel
+    // deliberately canonicalizes signed zero before applying the stable
+    // lower-index tie-break, matching the legacy comparator.
+    let zeroSelectionBias = MLXArray(
+      Array(repeating: Float(-0.5), count: 256))
+    let legacyZero = lagunaSigmoidTopK8Router(
+      tiedLogits, correctionBias: zeroSelectionBias)
+    let fusedZero = fusedLagunaSigmoidTopK8Router(
+      tiedLogits, correctionBias: zeroSelectionBias)
+    eval(legacyZero.weights, legacyZero.indices, fusedZero.weights, fusedZero.indices)
+    #expect(MLX.arrayEqual(legacyZero.indices, fusedZero.indices).item(Bool.self))
+    #expect(MLX.arrayEqual(legacyZero.weights, fusedZero.weights).item(Bool.self))
+  }
+
+  @Test("Fused Laguna router preserves cached one-token logits")
+  func fusedRouterPreservesCachedDecodeLogits() throws {
+    let configuration = try decodeConfiguration(
+      numberOfExperts: 256,
+      expertsPerToken: 8)
+    let model = LagunaModel(configuration)
+    let legacyCache = try model.newCache(parameters: nil)
+    let fusedCache = try model.newCache(parameters: nil)
+    let prompt = MLXArray([Int32(1), 2, 3])[.newAxis]
+
+    let legacyPrefill = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      LagunaRuntimeTuning.$useFusedRouterTopK.withValue(false) {
+        model(prompt, cache: legacyCache)
+      }
+    }
+    let fusedPrefill = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      LagunaRuntimeTuning.$useFusedRouterTopK.withValue(true) {
+        model(prompt, cache: fusedCache)
+      }
+    }
+    eval(legacyPrefill, fusedPrefill)
+    eval(legacyCache)
+    eval(fusedCache)
+    #expect(MLX.arrayEqual(legacyPrefill, fusedPrefill).item(Bool.self))
+
+    let nextToken = MLXArray([Int32(4)])[.newAxis]
+    let legacy = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      LagunaRuntimeTuning.$useFusedRouterTopK.withValue(false) {
+        model(nextToken, cache: legacyCache)
+      }
+    }
+    let fused = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      LagunaRuntimeTuning.$useFusedRouterTopK.withValue(true) {
+        model(nextToken, cache: fusedCache)
+      }
+    }
+    eval(legacy, fused)
+    eval(legacyCache)
+    eval(fusedCache)
+
+    #expect(legacyCache.allSatisfy { $0.offset == 4 })
+    #expect(fusedCache.allSatisfy { $0.offset == 4 })
+    #expect(MLX.arrayEqual(legacy, fused).item(Bool.self))
+  }
+
   private func decodeConfiguration(
     numberOfExperts: Int = 4,
     expertsPerToken: Int = 2

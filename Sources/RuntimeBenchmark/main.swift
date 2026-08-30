@@ -127,6 +127,24 @@ private struct LagunaBlockTailABComparison: Encodable {
   }
 }
 
+private struct LagunaRouterTopKABComparison: Encodable {
+  var trialsPerMode: Int
+  var legacyMedianDecodeTokensPerSecond: Double
+  var fusedMedianDecodeTokensPerSecond: Double
+  var fusedSpeedupPercent: Double
+  var outputsMatchExactly: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case trialsPerMode = "trials_per_mode"
+    case legacyMedianDecodeTokensPerSecond =
+      "legacy_median_decode_tokens_per_second"
+    case fusedMedianDecodeTokensPerSecond =
+      "fused_median_decode_tokens_per_second"
+    case fusedSpeedupPercent = "fused_speedup_percent"
+    case outputsMatchExactly = "outputs_match_exactly"
+  }
+}
+
 private struct PromptCacheComparison: Encodable {
   var trialsPerMode: Int
   var cachedMedianTimeToFirstTokenMilliseconds: Double
@@ -168,6 +186,7 @@ private struct GenerationMode {
   var useLagunaFusion: Bool
   var useCompiledAttentionGate: Bool
   var useCompiledBlockTail = false
+  var useFusedRouterTopK = false
   var usePromptCache = true
 }
 
@@ -190,6 +209,7 @@ private struct RuntimeBenchmarkReport: Encodable {
   var lagunaFusionABComparison: LagunaFusionABComparison?
   var lagunaAttentionGateABComparison: LagunaAttentionGateABComparison?
   var lagunaBlockTailABComparison: LagunaBlockTailABComparison?
+  var lagunaRouterTopKABComparison: LagunaRouterTopKABComparison?
   var promptCacheComparison: PromptCacheComparison?
   var warmups: [RecordedTrial]
   var trials: [RecordedTrial]
@@ -210,6 +230,7 @@ private struct RuntimeBenchmarkReport: Encodable {
     case lagunaFusionABComparison = "laguna_fusion_ab_comparison"
     case lagunaAttentionGateABComparison = "laguna_attention_gate_ab_comparison"
     case lagunaBlockTailABComparison = "laguna_block_tail_ab_comparison"
+    case lagunaRouterTopKABComparison = "laguna_router_topk_ab_comparison"
     case promptCacheComparison = "prompt_cache_comparison"
   }
 }
@@ -296,6 +317,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
   var lagunaBlockTailAB = false
 
   @Flag(
+    name: .customLong("laguna-router-topk-ab"),
+    help:
+      "Alternate legacy and fused Laguna decode router top-k tails on one loaded target; both arms use compiled block tails and --trials is the count per mode."
+  )
+  var lagunaRouterTopKAB = false
+
+  @Flag(
     name: .customLong("prompt-cache"),
     help:
       "Measure a Laguna sibling branch restored from the completed-prefix LRU versus a forced-cold replay; reports TTFT and cache/prefill token counts, not decode speedup."
@@ -355,15 +383,20 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       throw ValidationError(
         "--laguna-block-tail-ab cannot be combined with --dflash-model.")
     }
+    if lagunaRouterTopKAB, dflashModel != nil {
+      throw ValidationError(
+        "--laguna-router-topk-ab cannot be combined with --dflash-model.")
+    }
     if promptCache, dflashModel != nil {
       throw ValidationError("--prompt-cache cannot be combined with --dflash-model.")
     }
     let exclusiveModes = [
-      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB, promptCache,
+      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB,
+      lagunaRouterTopKAB, promptCache,
     ].filter { $0 }.count
     if exclusiveModes > 1 {
       throw ValidationError(
-        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, and --prompt-cache are mutually exclusive."
+        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, --laguna-router-topk-ab, and --prompt-cache are mutually exclusive."
       )
     }
   }
@@ -382,6 +415,9 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     guard !FileManager.default.fileExists(atPath: outputURL.path) else {
       throw BenchmarkError.invalidInput("output already exists: \(outputURL.path)")
     }
+    if lagunaRouterTopKAB {
+      try validateFusedRouterCheckpoint(modelURL)
+    }
     let requestedEngine: ModelEngine
     do {
       requestedEngine = try ModelEngine(argument: engine)
@@ -397,6 +433,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       dflashModelPath: dflashModel,
       dflashBlockSize: dflashBlockSize
     )
+    if lagunaRouterTopKAB, runner.engine != .metal {
+      throw BenchmarkError.invalidInput(
+        "--laguna-router-topk-ab requires the Metal engine; resolved \(runner.engine.rawValue)."
+      )
+    }
     let messages = [OpenAIMessage(role: "user", content: prompt)]
     var warmupRecords = [RecordedTrial]()
     var measuredRecords = [RecordedTrial]()
@@ -432,6 +473,14 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       label: "laguna_block_tail_compiled", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
       useCompiledBlockTail: true)
+    let routerTopKLegacyMode = GenerationMode(
+      label: "laguna_router_topk_legacy", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useFusedRouterTopK: false)
+    let routerTopKFusedMode = GenerationMode(
+      label: "laguna_router_topk_fused", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useFusedRouterTopK: true)
 
     if promptCache {
       for warmupIndex in 0..<warmups {
@@ -466,6 +515,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         warmupModes = [attentionGateEagerMode, attentionGateCompiledMode]
       } else if lagunaBlockTailAB {
         warmupModes = [blockTailEagerMode, blockTailCompiledMode]
+      } else if lagunaRouterTopKAB {
+        warmupModes = [routerTopKLegacyMode, routerTopKFusedMode]
       } else {
         warmupModes = [ordinaryMode]
       }
@@ -506,6 +557,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
             trialIndex.isMultiple(of: 2)
             ? [blockTailEagerMode, blockTailCompiledMode]
             : [blockTailCompiledMode, blockTailEagerMode]
+        } else if lagunaRouterTopKAB {
+          measuredModes =
+            trialIndex.isMultiple(of: 2)
+            ? [routerTopKLegacyMode, routerTopKFusedMode]
+            : [routerTopKFusedMode, routerTopKLegacyMode]
         } else {
           measuredModes = [ordinaryMode]
         }
@@ -542,6 +598,12 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     let blockTailCompiledRecords = measuredRecords.filter {
       $0.mode == "laguna_block_tail_compiled"
     }
+    let routerTopKLegacyRecords = measuredRecords.filter {
+      $0.mode == "laguna_router_topk_legacy"
+    }
+    let routerTopKFusedRecords = measuredRecords.filter {
+      $0.mode == "laguna_router_topk_fused"
+    }
     let promptCacheCachedRecords = measuredRecords.filter {
       $0.mode == "prompt_cache_cached"
     }
@@ -557,6 +619,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       primaryRecords = attentionGateCompiledRecords
     } else if lagunaBlockTailAB {
       primaryRecords = blockTailCompiledRecords
+    } else if lagunaRouterTopKAB {
+      primaryRecords = routerTopKFusedRecords
     } else if promptCache {
       primaryRecords = []
     } else {
@@ -645,6 +709,27 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else {
       lagunaBlockTailComparison = nil
     }
+    let lagunaRouterTopKComparison: LagunaRouterTopKABComparison?
+    if lagunaRouterTopKAB {
+      let legacyMedian = median(
+        routerTopKLegacyRecords.map(\.metrics.tokensPerSecond))
+      let fusedMedian = median(
+        routerTopKFusedRecords.map(\.metrics.tokensPerSecond))
+      let referenceContent = routerTopKLegacyRecords.first?.content
+      let outputsMatch =
+        referenceContent != nil
+        && routerTopKLegacyRecords.allSatisfy { $0.content == referenceContent }
+        && routerTopKFusedRecords.allSatisfy { $0.content == referenceContent }
+      lagunaRouterTopKComparison = LagunaRouterTopKABComparison(
+        trialsPerMode: trials,
+        legacyMedianDecodeTokensPerSecond: legacyMedian,
+        fusedMedianDecodeTokensPerSecond: fusedMedian,
+        fusedSpeedupPercent: 100 * (fusedMedian / legacyMedian - 1),
+        outputsMatchExactly: outputsMatch
+      )
+    } else {
+      lagunaRouterTopKComparison = nil
+    }
     let promptCacheModeComparison: PromptCacheComparison?
     if promptCache {
       let cachedTTFT = median(
@@ -694,6 +779,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       lagunaFusionABComparison: lagunaFusionComparison,
       lagunaAttentionGateABComparison: lagunaAttentionGateComparison,
       lagunaBlockTailABComparison: lagunaBlockTailComparison,
+      lagunaRouterTopKABComparison: lagunaRouterTopKComparison,
       promptCacheComparison: promptCacheModeComparison,
       warmups: warmupRecords,
       trials: measuredRecords
@@ -744,6 +830,16 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         )
       )
       print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
+    } else if let comparison = lagunaRouterTopKComparison {
+      print(
+        String(
+          format: "A/B median: legacy router %.2f tok/s, fused router %.2f tok/s (%+.2f%%)",
+          comparison.legacyMedianDecodeTokensPerSecond,
+          comparison.fusedMedianDecodeTokensPerSecond,
+          comparison.fusedSpeedupPercent
+        )
+      )
+      print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
     } else if let comparison = promptCacheModeComparison {
       print(
         String(
@@ -774,6 +870,42 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     print("Wrote \(outputURL.path)")
   }
 
+  private func validateFusedRouterCheckpoint(_ modelURL: URL) throws {
+    let configURL = modelURL.appendingPathComponent("config.json")
+    let data: Data
+    do {
+      data = try Data(contentsOf: configURL)
+    } catch {
+      throw BenchmarkError.invalidInput(
+        "--laguna-router-topk-ab requires a readable config.json: \(error.localizedDescription)"
+      )
+    }
+    guard
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      object["model_type"] as? String == "laguna"
+    else {
+      throw BenchmarkError.invalidInput(
+        "--laguna-router-topk-ab requires a native Laguna checkpoint.")
+    }
+    guard
+      let quantization = object["quantization"] as? [String: Any],
+      let bits = quantization["bits"] as? NSNumber,
+      bits.intValue == 4
+    else {
+      throw BenchmarkError.invalidInput(
+        "--laguna-router-topk-ab requires a Q4 checkpoint (quantization.bits == 4).")
+    }
+    let experts = (object["num_experts"] as? NSNumber)?.intValue
+    let topK = (object["num_experts_per_tok"] as? NSNumber)?.intValue
+    let scoreFunction = object["moe_router_score_func"] as? String ?? "sigmoid"
+    let softcap = (object["moe_router_logit_softcapping"] as? NSNumber)?.doubleValue ?? 0
+    guard experts == 256, topK == 8, scoreFunction == "sigmoid", softcap == 0 else {
+      throw BenchmarkError.invalidInput(
+        "--laguna-router-topk-ab requires the 256-expert/top-8 sigmoid router with zero softcap."
+      )
+    }
+  }
+
   private func runGeneration(
     runner: LocalModelRunner,
     messages: [OpenAIMessage],
@@ -791,14 +923,18 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         await LagunaRuntimeTuning.$useCompiledBlockTail.withValue(
           mode.useCompiledBlockTail
         ) {
-          await runner.stream(
-            messages: messages,
-            maximumTokens: tokens,
-            temperature: 0,
-            topP: 1,
-            enablePromptCache: mode.usePromptCache,
-            enableSpeculativeDecoding: mode.useDFlash
-          )
+          await LagunaRuntimeTuning.$useFusedRouterTopK.withValue(
+            mode.useFusedRouterTopK
+          ) {
+            await runner.stream(
+              messages: messages,
+              maximumTokens: tokens,
+              temperature: 0,
+              topP: 1,
+              enablePromptCache: mode.usePromptCache,
+              enableSpeculativeDecoding: mode.useDFlash
+            )
+          }
         }
       }
     }
