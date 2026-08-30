@@ -21,6 +21,42 @@ ScaleSearch median.
 measured source is preserved separately before any default-on production
 change.
 
+## Default-on production confirmation
+
+After preserving the default-off candidate and both same-loaded campaigns,
+commit `8fa0f0a07b2ae0b39c21a3d20955ff97600b4ff2` enabled the compiled block tail
+and fused router automatically for `LocalModelRunner` requests resolved to the
+Metal engine. CPU and CUDA remain on the existing path. Scoped explicit true
+and false values still override the automatic choice, so the same-loaded A/B
+and rollback diagnostics remain valid.
+
+The ordinary benchmark path used no fast-path flag:
+
+```sh
+.build/arm64-apple-macosx/release/model-runner-runtime-bench \
+  /Users/stephen/Documents/llm-abliteration/models/Laguna-XS-2.1-Abliterated-Q4R8-ScaleSearch-LS2 \
+  /private/tmp/fused-router-production-default-v3.json \
+  --engine metal \
+  --tokens 128 \
+  --warmups 2 \
+  --trials 6
+```
+
+- Default-on median: `185.291435150063 tok/s`
+- Default-on geometric mean: `184.905172116502 tok/s`
+- Early-three versus late-three drift: `-0.147554408633%`
+- Lead over Ollama: `5.725212082682 tok/s` (`+3.188356910828%`)
+- Improvement over the prior `177.499062770142 tok/s` best arm:
+  `+4.390092126859%`
+- All warmups and trials: exact 742-byte output, 128/128 tokens, `length` stop
+- Production release binary SHA-256:
+  `fc9b1ad973f1fc1d27b046f3d462aae1163bf72aff697da5a1e22fd53105f385`
+
+Two intervening diagnostic runs were excluded from performance evidence after
+`mediaanalysisd` reached 131% CPU. The preserved production confirmation was
+run only after that daemon fell to single-digit CPU and satisfies the drift
+gate independently.
+
 ## Candidate
 
 - Branch: `codex/fused-laguna-router-fast-path`
@@ -101,4 +137,5 @@ The two execution-order effects were independently positive in each campaign:
   `8f286429af423528886ecf9227dffdf5e57b1aadcdbeeff7a5d041ff000e2802`
 - `fused-router-debug-smoke-v1.json` SHA-256:
   `8900b30b3c13c5e1e38a45c386250e93b793f1c2d3beecced7ad7119fa875a5d`
-
+- `fused-router-production-default-v3.json` SHA-256:
+  `068b5f781a38d04d427e8e6c62f2a23d1e2c81ffefd294e9a37eb5852d6b2f06`

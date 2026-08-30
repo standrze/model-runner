@@ -32,13 +32,15 @@ a tag.
 - Candidate promotion gate: correct output, at least `+1%`, and absolute drift
   no greater than `1%` in controlled forward and reverse brackets
 
-The fused Laguna router top-k candidate is the highest correct measured arm at
-`183.753624693681 tok/s` in its conservative confirmation. It beat its
-same-loaded compiled-tail control by `+3.483719502080%`, cleared the strict
-stability gate twice, and is `4.187401626300 tok/s` (`+2.331953947001%`)
-faster than the historical exact Ollama median. Raw evidence is under
-`benchmark-results/laguna-fused-router-topk-20260830/`. The measured source is
-preserved before the separate default-on production rollback point.
+The fused Laguna router top-k stack is the highest correct measured build. Its
+conservative same-loaded confirmation reached `183.753624693681 tok/s`, beat
+the compiled-tail control by `+3.483719502080%`, and cleared the strict
+stability gate twice. The ordinary default-on production path then reached
+`185.291435150063 tok/s` with `-0.147554408633%` early/late drift: a
+`5.725212082682 tok/s` (`+3.188356910828%`) lead over the historical exact
+Ollama median. Raw evidence is under
+`benchmark-results/laguna-fused-router-topk-20260830/`; both the default-off
+measured source and default-on production source are separate rollback points.
 
 The earlier compiled Laguna block-tail experiment reached
 `177.499062770142 tok/s`, but its isolated `+0.935598000375%` effect missed the
@@ -86,7 +88,9 @@ respective measured branches and annotated tags remain rollback points.
 | `persistent-compiled-closure-candidate-v1` | `861793f` | Default-off retained stateless compile closure | Lifetime and real-Q4 checks passed |
 | `persistent-compiled-closure-measured-v1` | `abc5262` | Same-loaded alternating A/B evidence | `-0.042423215199%` order-balanced; neutral |
 | `laguna-fused-router-topk-candidate-v1` | `c6c29da` | One-dispatch stable biased top-8 decode router | Exact unit, tiny-model, and real-Q4 checks passed |
-| `laguna-fused-router-topk-measured-v1` | this commit | Two independent same-loaded campaigns | `183.753624693681 tok/s`; `+3.48%` / `+4.18%`; beats Ollama |
+| `laguna-fused-router-topk-measured-v1` | `9279a5f` | Two independent same-loaded campaigns | `183.753624693681 tok/s`; `+3.48%` / `+4.18%`; beats Ollama |
+| `laguna-fused-router-topk-production-source-v1` | `8fa0f0a` | Metal-only automatic production selection | Full 108-test suite and Release build passed |
+| `laguna-fused-router-topk-production-v1` | this commit | Default-on production confirmation | `185.291435150063 tok/s`; `+3.188356910828%` ahead of Ollama |
 
 ## Clean incremental candidate
 
@@ -153,6 +157,14 @@ All FP32, FP16, and BF16 router results are bit-identical, including stable
 ties. Tiny cached-decode logits and all real-Q4 benchmark outputs are exact.
 Early/late drift remained below `1%` in both confirmation campaigns. This is
 the first experimental stack to clear every promotion gate.
+
+The separate production source commit selects both fast paths automatically
+only when `LocalModelRunner` resolves the Metal engine. It preserves explicit
+scoped overrides and leaves CPU/CUDA unchanged. The ordinary no-flag Release
+benchmark reached `185.291435150063 tok/s` (geometric mean
+`184.905172116502`) with `-0.147554408633%` early/late drift. Its release
+binary SHA-256 is
+`fc9b1ad973f1fc1d27b046f3d462aae1163bf72aff697da5a1e22fd53105f385`.
 
 ## Standalone Swift server
 
