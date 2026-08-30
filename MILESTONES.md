@@ -47,6 +47,7 @@ tree to a tag.
 | `incremental-bytelevel-decoder-measured-v1` | `e120a83` | Small repeatable win | `+0.4822%` to `+0.5501%`; not promoted alone |
 | `consolidated-decoder-fast-path-candidate-v1` | `38604eb` | Clean v3 + incremental + in-place candidate | Composite benchmark pending |
 | `stable-string-cache-candidate-v1` | `59e2605` | Bounded decoded-string cache; correctness passed | Clean benchmark pending |
+| `stable-string-cache-measured-v1` | `cc51e45` | Rejected after clean dual-order campaign | `-0.4698%` balanced; not promoted |
 
 ## Clean consolidated candidate
 
