@@ -1,0 +1,74 @@
+diff --git a/Source/Cmlx/include-framework/mlx-c-stream.h b/Source/Cmlx/include-framework/mlx-c-stream.h
+--- a/Source/Cmlx/include-framework/mlx-c-stream.h
++++ b/Source/Cmlx/include-framework/mlx-c-stream.h
+@@ -90,6 +90,18 @@ mlx_stream mlx_default_cpu_stream_new(void);
+  */
+ mlx_stream mlx_default_gpu_stream_new(void);
+ 
++/**
++ * Enable or disable the experimental Metal command-encoder lookup cache.
++ * This is a no-op on builds without Metal and is disabled by default.
++ */
++int mlx_set_metal_command_encoder_cache_enabled(bool enabled);
++
++/**
++ * Return whether the experimental Metal command-encoder cache is enabled.
++ * This always returns false on builds without Metal.
++ */
++int mlx_get_metal_command_encoder_cache_enabled(bool* enabled);
++
+ /**@}*/
+ 
+ #ifdef __cplusplus
+diff --git a/Source/Cmlx/include/mlx/c/stream.h b/Source/Cmlx/include/mlx/c/stream.h
+--- a/Source/Cmlx/include/mlx/c/stream.h
++++ b/Source/Cmlx/include/mlx/c/stream.h
+@@ -90,6 +90,18 @@ mlx_stream mlx_default_cpu_stream_new(void);
+  */
+ mlx_stream mlx_default_gpu_stream_new(void);
+ 
++/**
++ * Enable or disable the experimental Metal command-encoder lookup cache.
++ * This is a no-op on builds without Metal and is disabled by default.
++ */
++int mlx_set_metal_command_encoder_cache_enabled(bool enabled);
++
++/**
++ * Return whether the experimental Metal command-encoder cache is enabled.
++ * This always returns false on builds without Metal.
++ */
++int mlx_get_metal_command_encoder_cache_enabled(bool* enabled);
++
+ /**@}*/
+ 
+ #ifdef __cplusplus
+diff --git a/Source/MLX/MetalCommandEncoderCache.swift b/Source/MLX/MetalCommandEncoderCache.swift
+new file mode 100644
+--- /dev/null
++++ b/Source/MLX/MetalCommandEncoderCache.swift
+@@ -0,0 +1,25 @@
++// Copyright © 2026 Model Runner contributors
++
++import Cmlx
++
++/// Enable or disable the experimental Metal last-stream command-encoder cache.
++///
++/// The cache is process-global, disabled by default, and a no-op on builds
++/// without Metal. Changing it is serialized with MLX evaluation and starts a
++/// fresh invalidation generation.
++public func setMetalCommandEncoderCacheEnabled(_ enabled: Bool) {
++    _ = withEvalLock {
++        mlx_set_metal_command_encoder_cache_enabled(enabled)
++    }
++}
++
++/// Return whether the experimental Metal command-encoder cache is enabled.
++///
++/// This always returns `false` on builds without Metal.
++public func metalCommandEncoderCacheEnabled() -> Bool {
++    withEvalLock {
++        var enabled = false
++        _ = mlx_get_metal_command_encoder_cache_enabled(&enabled)
++        return enabled
++    }
++}

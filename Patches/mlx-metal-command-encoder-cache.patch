@@ -1,0 +1,166 @@
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -1,5 +1,7 @@
+ // Copyright © 2023-2024 Apple Inc.
+ 
++#include <atomic>
++#include <cstdint>
+ #include <cstdlib>
+ #include <sstream>
+ 
+@@ -30,6 +32,21 @@ namespace mlx::core::metal {
+ namespace {
+ 
+ constexpr const char* default_mtllib_path = METAL_PATH;
++constexpr uint64_t command_encoder_cache_enabled_bit = 1;
++std::atomic<uint64_t> command_encoder_cache_state{0};
++
++struct LastCommandEncoder {
++  int stream_index{-1};
++  uint64_t generation_state{0};
++  CommandEncoder* encoder{nullptr};
++};
++
++LastCommandEncoder& last_command_encoder() {
++  // Stream indices come from one process-global sequence, so they identify
++  // both thread-local and thread-unsafe global encoder maps.
++  static thread_local LastCommandEncoder cached;
++  return cached;
++}
+ 
+ void set_compile_options(
+     MTL::CompileOptions* mtl_options,
+@@ -915,7 +932,61 @@ Device& device(mlx::core::Device) {
+   return *metal_device;
+ }
+ 
++void set_command_encoder_cache_enabled(bool enabled) {
++  // Bit zero is the switch and the upper bits are the invalidation generation.
++  // A CAS changes both in one publication while advancing the generation.
++  auto current = command_encoder_cache_state.load(std::memory_order_relaxed);
++  while (true) {
++    auto next = (current + 2) & ~command_encoder_cache_enabled_bit;
++    if (enabled) {
++      next |= command_encoder_cache_enabled_bit;
++    }
++    if (command_encoder_cache_state.compare_exchange_weak(
++            current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
++      return;
++    }
++  }
++}
++
++bool is_command_encoder_cache_enabled() {
++  return (command_encoder_cache_state.load(std::memory_order_acquire) &
++          command_encoder_cache_enabled_bit) != 0;
++}
++
++void invalidate_command_encoder_cache() {
++  // clear_streams() is already required to be externally serialized against
++  // evaluation. Bumping first makes every thread-local pointer stale before
++  // either encoder map destroys its elements.
++  command_encoder_cache_state.fetch_add(2, std::memory_order_acq_rel);
++}
++
+ CommandEncoder& get_command_encoder(Stream s) {
++  const auto cache_state =
++      command_encoder_cache_state.load(std::memory_order_acquire);
++  if ((cache_state & command_encoder_cache_enabled_bit) == 0) {
++    // Preserve the production-default lookup semantics: local lookup first,
++    // then the thread-unsafe global map, with the original error on a miss.
++    auto& encoders = get_command_encoders();
++    auto it = encoders.find(s.index);
++    if (it == encoders.end()) {
++      auto& global_encoders = get_global_command_encoders();
++      it = global_encoders.find(s.index);
++      if (it == global_encoders.end()) {
++        throw std::runtime_error(
++            fmt::format(
++                "There is no Stream(gpu, {}) in current thread.", s.index));
++      }
++    }
++    return it->second;
++  }
++
++  auto& cached = last_command_encoder();
++  if (cached.generation_state == cache_state &&
++      cached.stream_index == s.index &&
++      cached.encoder != nullptr) {
++    return *cached.encoder;
++  }
++
+   auto& encoders = get_command_encoders();
+   auto it = encoders.find(s.index);
+   if (it == encoders.end()) {
+@@ -927,7 +998,15 @@ CommandEncoder& get_command_encoder(Stream s) {
+               "There is no Stream(gpu, {}) in current thread.", s.index));
+     }
+   }
+-  return it->second;
++
++  auto* encoder = &it->second;
++  // unordered_map rehash and insertion preserve pointers/references to
++  // elements. clear_streams() is the destructive operation, and it advances
++  // the generation before clearing either the local or global map.
++  cached.stream_index = s.index;
++  cached.generation_state = cache_state;
++  cached.encoder = encoder;
++  return *encoder;
+ }
+ 
+ std::unordered_map<int, CommandEncoder>& get_command_encoders() {
+diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
+--- a/mlx/backend/metal/device.h
++++ b/mlx/backend/metal/device.h
+@@ -250,6 +250,7 @@ class Device {
+ 
+ MLX_API Device& device(mlx::core::Device);
+ MLX_API CommandEncoder& get_command_encoder(Stream s);
++void invalidate_command_encoder_cache();
+ 
+ std::unordered_map<int, CommandEncoder>& get_command_encoders();
+ std::unordered_map<int, CommandEncoder>& get_global_command_encoders();
+diff --git a/mlx/backend/metal/eval.cpp b/mlx/backend/metal/eval.cpp
+--- a/mlx/backend/metal/eval.cpp
++++ b/mlx/backend/metal/eval.cpp
+@@ -81,6 +81,7 @@ void synchronize(Stream s) {
+ }
+ 
+ void clear_streams() {
++  metal::invalidate_command_encoder_cache();
+   metal::get_command_encoders().clear();
+   if (is_main_thread()) {
+     metal::get_global_command_encoders().clear();
+diff --git a/mlx/backend/metal/metal.h b/mlx/backend/metal/metal.h
+--- a/mlx/backend/metal/metal.h
++++ b/mlx/backend/metal/metal.h
+@@ -13,6 +13,12 @@ namespace mlx::core::metal {
+ /* Check if the Metal backend is available. */
+ MLX_API bool is_available();
+ 
++/* Enable the experimental last-stream CommandEncoder lookup cache. */
++MLX_API void set_command_encoder_cache_enabled(bool enabled);
++
++/* Check whether the experimental lookup cache is enabled. */
++MLX_API bool is_command_encoder_cache_enabled();
++
+ /** Capture a GPU trace, saving it to an absolute file `path` */
+ MLX_API void start_capture(std::string path = "");
+ MLX_API void stop_capture();
+diff --git a/mlx/backend/metal/no_metal.cpp b/mlx/backend/metal/no_metal.cpp
+--- a/mlx/backend/metal/no_metal.cpp
++++ b/mlx/backend/metal/no_metal.cpp
+@@ -13,6 +13,12 @@ bool is_available() {
+   return false;
+ }
+ 
++void set_command_encoder_cache_enabled(bool) {}
++
++bool is_command_encoder_cache_enabled() {
++  return false;
++}
++
+ void start_capture(std::string) {}
+ void stop_capture() {}
+ 

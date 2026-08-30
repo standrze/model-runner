@@ -127,6 +127,24 @@ private struct LagunaBlockTailABComparison: Encodable {
   }
 }
 
+private struct MetalCommandEncoderCacheABComparison: Encodable {
+  var trialsPerMode: Int
+  var cacheOffMedianDecodeTokensPerSecond: Double
+  var cacheOnMedianDecodeTokensPerSecond: Double
+  var cacheSpeedupPercent: Double
+  var outputsMatchExactly: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case trialsPerMode = "trials_per_mode"
+    case cacheOffMedianDecodeTokensPerSecond =
+      "cache_off_median_decode_tokens_per_second"
+    case cacheOnMedianDecodeTokensPerSecond =
+      "cache_on_median_decode_tokens_per_second"
+    case cacheSpeedupPercent = "cache_speedup_percent"
+    case outputsMatchExactly = "outputs_match_exactly"
+  }
+}
+
 private struct PromptCacheComparison: Encodable {
   var trialsPerMode: Int
   var cachedMedianTimeToFirstTokenMilliseconds: Double
@@ -168,6 +186,7 @@ private struct GenerationMode {
   var useLagunaFusion: Bool
   var useCompiledAttentionGate: Bool
   var useCompiledBlockTail = false
+  var useMetalCommandEncoderCache = false
   var usePromptCache = true
 }
 
@@ -190,6 +209,7 @@ private struct RuntimeBenchmarkReport: Encodable {
   var lagunaFusionABComparison: LagunaFusionABComparison?
   var lagunaAttentionGateABComparison: LagunaAttentionGateABComparison?
   var lagunaBlockTailABComparison: LagunaBlockTailABComparison?
+  var metalCommandEncoderCacheABComparison: MetalCommandEncoderCacheABComparison?
   var promptCacheComparison: PromptCacheComparison?
   var warmups: [RecordedTrial]
   var trials: [RecordedTrial]
@@ -210,6 +230,8 @@ private struct RuntimeBenchmarkReport: Encodable {
     case lagunaFusionABComparison = "laguna_fusion_ab_comparison"
     case lagunaAttentionGateABComparison = "laguna_attention_gate_ab_comparison"
     case lagunaBlockTailABComparison = "laguna_block_tail_ab_comparison"
+    case metalCommandEncoderCacheABComparison =
+      "metal_command_encoder_cache_ab_comparison"
     case promptCacheComparison = "prompt_cache_comparison"
   }
 }
@@ -296,6 +318,13 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
   var lagunaBlockTailAB = false
 
   @Flag(
+    name: .customLong("metal-command-encoder-cache-ab"),
+    help:
+      "Alternate disabled/enabled Metal command-encoder cache generations on one loaded Q4 Laguna model; both arms use the compiled block tail."
+  )
+  var metalCommandEncoderCacheAB = false
+
+  @Flag(
     name: .customLong("prompt-cache"),
     help:
       "Measure a Laguna sibling branch restored from the completed-prefix LRU versus a forced-cold replay; reports TTFT and cache/prefill token counts, not decode speedup."
@@ -355,21 +384,30 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       throw ValidationError(
         "--laguna-block-tail-ab cannot be combined with --dflash-model.")
     }
+    if metalCommandEncoderCacheAB, dflashModel != nil {
+      throw ValidationError(
+        "--metal-command-encoder-cache-ab cannot be combined with --dflash-model.")
+    }
     if promptCache, dflashModel != nil {
       throw ValidationError("--prompt-cache cannot be combined with --dflash-model.")
     }
     let exclusiveModes = [
-      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB, promptCache,
+      dflashAB, lagunaFusionAB, lagunaAttentionGateAB, lagunaBlockTailAB,
+      metalCommandEncoderCacheAB, promptCache,
     ].filter { $0 }.count
     if exclusiveModes > 1 {
       throw ValidationError(
-        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, and --prompt-cache are mutually exclusive."
+        "--dflash-ab, --laguna-fusion-ab, --laguna-attention-gate-ab, --laguna-block-tail-ab, --metal-command-encoder-cache-ab, and --prompt-cache are mutually exclusive."
       )
     }
   }
 
   mutating func run() async throws {
-    defer { clearModelRunnerMLXStreams() }
+    setModelRunnerMetalCommandEncoderCacheEnabled(false)
+    defer {
+      setModelRunnerMetalCommandEncoderCacheEnabled(false)
+      clearModelRunnerMLXStreams()
+    }
 
     let modelURL = URL(fileURLWithPath: model).standardizedFileURL
     let outputURL = URL(fileURLWithPath: output).standardizedFileURL
@@ -381,6 +419,9 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     }
     guard !FileManager.default.fileExists(atPath: outputURL.path) else {
       throw BenchmarkError.invalidInput("output already exists: \(outputURL.path)")
+    }
+    if metalCommandEncoderCacheAB {
+      try validateQ4LagunaCheckpoint(modelURL)
     }
     let requestedEngine: ModelEngine
     do {
@@ -397,6 +438,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       dflashModelPath: dflashModel,
       dflashBlockSize: dflashBlockSize
     )
+    if metalCommandEncoderCacheAB, runner.engine != .metal {
+      throw BenchmarkError.invalidInput(
+        "--metal-command-encoder-cache-ab requires the Metal engine; resolved \(runner.engine.rawValue)."
+      )
+    }
     let messages = [OpenAIMessage(role: "user", content: prompt)]
     var warmupRecords = [RecordedTrial]()
     var measuredRecords = [RecordedTrial]()
@@ -432,6 +478,14 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       label: "laguna_block_tail_compiled", useDFlash: false,
       useLagunaFusion: true, useCompiledAttentionGate: true,
       useCompiledBlockTail: true)
+    let encoderCacheOffMode = GenerationMode(
+      label: "metal_command_encoder_cache_off", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useMetalCommandEncoderCache: false)
+    let encoderCacheOnMode = GenerationMode(
+      label: "metal_command_encoder_cache_on", useDFlash: false,
+      useLagunaFusion: true, useCompiledAttentionGate: true,
+      useCompiledBlockTail: true, useMetalCommandEncoderCache: true)
 
     if promptCache {
       for warmupIndex in 0..<warmups {
@@ -466,6 +520,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         warmupModes = [attentionGateEagerMode, attentionGateCompiledMode]
       } else if lagunaBlockTailAB {
         warmupModes = [blockTailEagerMode, blockTailCompiledMode]
+      } else if metalCommandEncoderCacheAB {
+        warmupModes = [encoderCacheOffMode, encoderCacheOnMode]
       } else {
         warmupModes = [ordinaryMode]
       }
@@ -506,6 +562,11 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
             trialIndex.isMultiple(of: 2)
             ? [blockTailEagerMode, blockTailCompiledMode]
             : [blockTailCompiledMode, blockTailEagerMode]
+        } else if metalCommandEncoderCacheAB {
+          measuredModes =
+            trialIndex.isMultiple(of: 2)
+            ? [encoderCacheOffMode, encoderCacheOnMode]
+            : [encoderCacheOnMode, encoderCacheOffMode]
         } else {
           measuredModes = [ordinaryMode]
         }
@@ -542,6 +603,12 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     let blockTailCompiledRecords = measuredRecords.filter {
       $0.mode == "laguna_block_tail_compiled"
     }
+    let encoderCacheOffRecords = measuredRecords.filter {
+      $0.mode == "metal_command_encoder_cache_off"
+    }
+    let encoderCacheOnRecords = measuredRecords.filter {
+      $0.mode == "metal_command_encoder_cache_on"
+    }
     let promptCacheCachedRecords = measuredRecords.filter {
       $0.mode == "prompt_cache_cached"
     }
@@ -557,6 +624,8 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       primaryRecords = attentionGateCompiledRecords
     } else if lagunaBlockTailAB {
       primaryRecords = blockTailCompiledRecords
+    } else if metalCommandEncoderCacheAB {
+      primaryRecords = encoderCacheOnRecords
     } else if promptCache {
       primaryRecords = []
     } else {
@@ -645,6 +714,27 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     } else {
       lagunaBlockTailComparison = nil
     }
+    let metalCommandEncoderCacheComparison: MetalCommandEncoderCacheABComparison?
+    if metalCommandEncoderCacheAB {
+      let cacheOffMedian = median(
+        encoderCacheOffRecords.map(\.metrics.tokensPerSecond))
+      let cacheOnMedian = median(
+        encoderCacheOnRecords.map(\.metrics.tokensPerSecond))
+      let referenceContent = encoderCacheOffRecords.first?.content
+      let outputsMatch =
+        referenceContent != nil
+        && encoderCacheOffRecords.allSatisfy { $0.content == referenceContent }
+        && encoderCacheOnRecords.allSatisfy { $0.content == referenceContent }
+      metalCommandEncoderCacheComparison = MetalCommandEncoderCacheABComparison(
+        trialsPerMode: trials,
+        cacheOffMedianDecodeTokensPerSecond: cacheOffMedian,
+        cacheOnMedianDecodeTokensPerSecond: cacheOnMedian,
+        cacheSpeedupPercent: 100 * (cacheOnMedian / cacheOffMedian - 1),
+        outputsMatchExactly: outputsMatch
+      )
+    } else {
+      metalCommandEncoderCacheComparison = nil
+    }
     let promptCacheModeComparison: PromptCacheComparison?
     if promptCache {
       let cachedTTFT = median(
@@ -694,6 +784,7 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
       lagunaFusionABComparison: lagunaFusionComparison,
       lagunaAttentionGateABComparison: lagunaAttentionGateComparison,
       lagunaBlockTailABComparison: lagunaBlockTailComparison,
+      metalCommandEncoderCacheABComparison: metalCommandEncoderCacheComparison,
       promptCacheComparison: promptCacheModeComparison,
       warmups: warmupRecords,
       trials: measuredRecords
@@ -744,6 +835,16 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
         )
       )
       print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
+    } else if let comparison = metalCommandEncoderCacheComparison {
+      print(
+        String(
+          format: "A/B median: encoder cache OFF %.2f tok/s, ON %.2f tok/s (%+.2f%%)",
+          comparison.cacheOffMedianDecodeTokensPerSecond,
+          comparison.cacheOnMedianDecodeTokensPerSecond,
+          comparison.cacheSpeedupPercent
+        )
+      )
+      print("A/B outputs match exactly: \(comparison.outputsMatchExactly)")
     } else if let comparison = promptCacheModeComparison {
       print(
         String(
@@ -774,12 +875,44 @@ private struct RuntimeBenchmark: AsyncParsableCommand {
     print("Wrote \(outputURL.path)")
   }
 
+  private func validateQ4LagunaCheckpoint(_ modelURL: URL) throws {
+    let configURL = modelURL.appendingPathComponent("config.json")
+    let data: Data
+    do {
+      data = try Data(contentsOf: configURL)
+    } catch {
+      throw BenchmarkError.invalidInput(
+        "--metal-command-encoder-cache-ab requires a readable config.json: \(error.localizedDescription)"
+      )
+    }
+    guard
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      object["model_type"] as? String == "laguna"
+    else {
+      throw BenchmarkError.invalidInput(
+        "--metal-command-encoder-cache-ab requires a native Laguna checkpoint."
+      )
+    }
+    guard
+      let quantization = object["quantization"] as? [String: Any],
+      let bits = quantization["bits"] as? NSNumber,
+      bits.intValue == 4
+    else {
+      throw BenchmarkError.invalidInput(
+        "--metal-command-encoder-cache-ab requires a Q4 checkpoint (quantization.bits == 4)."
+      )
+    }
+  }
+
   private func runGeneration(
     runner: LocalModelRunner,
     messages: [OpenAIMessage],
     sequence: Int,
     mode: GenerationMode
   ) async throws -> RecordedTrial {
+    setModelRunnerMetalCommandEncoderCacheEnabled(mode.useMetalCommandEncoderCache)
+    defer { setModelRunnerMetalCommandEncoderCacheEnabled(false) }
+
     let clock = ContinuousClock()
     let startedAt = clock.now
     let events = await LagunaRuntimeTuning.$useCompiledMoEFusion.withValue(

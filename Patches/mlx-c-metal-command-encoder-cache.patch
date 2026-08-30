@@ -1,0 +1,61 @@
+diff --git a/mlx/c/stream.cpp b/mlx/c/stream.cpp
+--- a/mlx/c/stream.cpp
++++ b/mlx/c/stream.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <cstring>
+ 
++#include "mlx/backend/metal/metal.h"
+ #include "mlx/c/device.h"
+ #include "mlx/c/error.h"
+ #include "mlx/c/private/mlx.h"
+@@ -119,9 +120,27 @@ extern "C" mlx_stream mlx_default_gpu_stream_new(void) {
+ extern "C" mlx_stream mlx_default_gpu_stream_new(void) {
+   try {
+     return mlx_stream_new_(
+         mlx::core::default_stream(mlx::core::Device::DeviceType::gpu));
+   } catch (std::exception& e) {
+     mlx_error(e.what());
+     return mlx_stream_new_();
+   }
+ }
++extern "C" int mlx_set_metal_command_encoder_cache_enabled(bool enabled) {
++  try {
++    mlx::core::metal::set_command_encoder_cache_enabled(enabled);
++  } catch (std::exception& e) {
++    mlx_error(e.what());
++    return 1;
++  }
++  return 0;
++}
++extern "C" int mlx_get_metal_command_encoder_cache_enabled(bool* enabled) {
++  try {
++    *enabled = mlx::core::metal::is_command_encoder_cache_enabled();
++  } catch (std::exception& e) {
++    mlx_error(e.what());
++    return 1;
++  }
++  return 0;
++}
+diff --git a/mlx/c/stream.h b/mlx/c/stream.h
+--- a/mlx/c/stream.h
++++ b/mlx/c/stream.h
+@@ -90,6 +90,18 @@ mlx_stream mlx_default_cpu_stream_new(void);
+  */
+ mlx_stream mlx_default_gpu_stream_new(void);
+ 
++/**
++ * Enable or disable the experimental Metal command-encoder lookup cache.
++ * This is a no-op on builds without Metal and is disabled by default.
++ */
++int mlx_set_metal_command_encoder_cache_enabled(bool enabled);
++
++/**
++ * Return whether the experimental Metal command-encoder cache is enabled.
++ * This always returns false on builds without Metal.
++ */
++int mlx_get_metal_command_encoder_cache_enabled(bool* enabled);
++
+ /**@}*/
+ 
+ #ifdef __cplusplus

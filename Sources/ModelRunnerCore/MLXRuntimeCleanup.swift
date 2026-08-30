@@ -1,5 +1,18 @@
 import MLX
 
+/// Toggle the experimental Metal command-encoder lookup cache.
+///
+/// The dependency implementation is process-global, serialized with MLX
+/// evaluation, disabled by default, and a no-op on non-Metal builds.
+public func setModelRunnerMetalCommandEncoderCacheEnabled(_ enabled: Bool) {
+  setMetalCommandEncoderCacheEnabled(enabled)
+}
+
+/// Return whether the experimental Metal command-encoder cache is enabled.
+public func modelRunnerMetalCommandEncoderCacheEnabled() -> Bool {
+  metalCommandEncoderCacheEnabled()
+}
+
 /// Synchronize and release MLX stream command encoders before process teardown.
 ///
 /// Current MLX-CUDA requires explicit cleanup while the CUDA driver is still
