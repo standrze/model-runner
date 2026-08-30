@@ -19,6 +19,7 @@ public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true
   @TaskLocal public static var useCompiledMoEFusion = true
   @TaskLocal public static var useCompiledBlockTail = false
+  @TaskLocal public static var useFusedQKVGProjection = false
 }
 
 enum LagunaCompiledBlockTailEligibility {
@@ -58,7 +59,7 @@ public enum LagunaConfigurationError: Error, Equatable, LocalizedError {
   }
 }
 
-enum LagunaAttentionGating: Sendable {
+enum LagunaAttentionGating: Sendable, Equatable {
   case disabled
   case perHead
 
@@ -77,6 +78,84 @@ enum LagunaAttentionGating: Sendable {
     case "per-head", "true": self = .perHead
     case "none", "false", "disabled": self = .disabled
     default: throw LagunaConfigurationError.unsupportedValue(field: "gating", value: value)
+    }
+  }
+}
+
+private struct LagunaQuantizationSpec: Decodable, Equatable, Sendable {
+  let groupSize: Int
+  let bits: Int
+  let mode: String
+
+  enum CodingKeys: String, CodingKey {
+    case groupSize = "group_size"
+    case bits
+    case mode
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    groupSize = try container.decode(Int.self, forKey: .groupSize)
+    bits = try container.decode(Int.self, forKey: .bits)
+    mode = try container.decodeIfPresent(String.self, forKey: .mode) ?? "affine"
+  }
+}
+
+private enum LagunaQuantizationOverride: Sendable {
+  case skip
+  case quantize(LagunaQuantizationSpec)
+}
+
+private struct LagunaQuantizationLayout: Decodable, Sendable {
+  private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init(stringValue: String) {
+      self.stringValue = stringValue
+      intValue = Int(stringValue)
+    }
+
+    init(intValue: Int) {
+      stringValue = String(intValue)
+      self.intValue = intValue
+    }
+  }
+
+  let defaultSpec: LagunaQuantizationSpec
+  let overrides: [String: LagunaQuantizationOverride]
+  let hasGlobalScale: Bool
+
+  init(from decoder: Decoder) throws {
+    defaultSpec = try LagunaQuantizationSpec(from: decoder)
+    let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+    hasGlobalScale = container.contains(
+      DynamicCodingKey(stringValue: "global_scale"))
+    var overrides = [String: LagunaQuantizationOverride]()
+    for key in container.allKeys {
+      guard
+        key.stringValue.hasSuffix(".self_attn.q_proj")
+          || key.stringValue.hasSuffix(".self_attn.k_proj")
+          || key.stringValue.hasSuffix(".self_attn.v_proj")
+          || key.stringValue.hasSuffix(".self_attn.g_proj")
+          || key.stringValue.hasSuffix(".self_attn.qkvg_proj")
+      else { continue }
+
+      if let enabled = try? container.decode(Bool.self, forKey: key) {
+        if !enabled { overrides[key.stringValue] = .skip }
+        continue
+      }
+      overrides[key.stringValue] = .quantize(
+        try container.decode(LagunaQuantizationSpec.self, forKey: key))
+    }
+    self.overrides = overrides
+  }
+
+  func resolvedSpec(for path: String) -> LagunaQuantizationSpec? {
+    switch overrides[path] {
+    case .skip: nil
+    case .quantize(let spec): spec
+    case nil: defaultSpec
     }
   }
 }
@@ -111,6 +190,7 @@ public struct LagunaConfiguration: Decodable, Sendable {
   var routedScalingFactor: Float
   var routerLogitSoftcap: Float
   var routerScoreFunction: String
+  private var quantizationLayout: LagunaQuantizationLayout?
 
   enum CodingKeys: String, CodingKey {
     case modelType = "model_type"
@@ -141,6 +221,7 @@ public struct LagunaConfiguration: Decodable, Sendable {
     case routedScalingFactor = "moe_routed_scaling_factor"
     case routerLogitSoftcap = "moe_router_logit_softcapping"
     case routerScoreFunction = "moe_router_score_func"
+    case quantizationLayout = "quantization"
   }
 
   public init(from decoder: Decoder) throws {
@@ -198,8 +279,24 @@ public struct LagunaConfiguration: Decodable, Sendable {
       try container.decodeIfPresent(Float.self, forKey: .routerLogitSoftcap) ?? 0
     routerScoreFunction =
       try container.decodeIfPresent(String.self, forKey: .routerScoreFunction) ?? "sigmoid"
+    quantizationLayout = try container.decodeIfPresent(
+      LagunaQuantizationLayout.self, forKey: .quantizationLayout)
 
     try validate()
+  }
+
+  func shouldFuseQKVGProjection(layerIndex: Int) -> Bool {
+    if gating == .perHead && qkvBias { return false }
+    guard let quantizationLayout else { return true }
+    if quantizationLayout.hasGlobalScale { return false }
+    let prefix = "language_model.model.layers.\(layerIndex).self_attn"
+    let query = quantizationLayout.resolvedSpec(for: "\(prefix).q_proj")
+    let key = quantizationLayout.resolvedSpec(for: "\(prefix).k_proj")
+    let value = quantizationLayout.resolvedSpec(for: "\(prefix).v_proj")
+    let gate = quantizationLayout.resolvedSpec(for: "\(prefix).g_proj")
+    let fused = quantizationLayout.resolvedSpec(for: "\(prefix).qkvg_proj")
+    return query == key && query == value && query == fused
+      && (gating == .disabled || query == gate)
   }
 
   private func validate() throws {
@@ -334,13 +431,18 @@ private final class LagunaAttention: Module {
   let numberOfHeads: Int
   let numberOfKeyValueHeads: Int
   let headDimension: Int
+  let queryDimensions: Int
+  let keyValueDimensions: Int
+  let gateDimensions: Int
   let scale: Float
   let usesSlidingWindow: Bool
+  let usesFusedQKVGProjection: Bool
   let rope: RoPELayer
 
-  @ModuleInfo(key: "q_proj") var queryProjection: Linear
-  @ModuleInfo(key: "k_proj") var keyProjection: Linear
-  @ModuleInfo(key: "v_proj") var valueProjection: Linear
+  @ModuleInfo(key: "qkvg_proj") var qkvgProjection: Linear?
+  @ModuleInfo(key: "q_proj") var queryProjection: Linear?
+  @ModuleInfo(key: "k_proj") var keyProjection: Linear?
+  @ModuleInfo(key: "v_proj") var valueProjection: Linear?
   @ModuleInfo(key: "o_proj") var outputProjection: Linear
   @ModuleInfo(key: "q_norm") var queryNorm: RMSNorm
   @ModuleInfo(key: "k_norm") var keyNorm: RMSNorm
@@ -350,26 +452,29 @@ private final class LagunaAttention: Module {
     numberOfHeads = configuration.attentionHeadsPerLayer[layerIndex]
     numberOfKeyValueHeads = configuration.keyValueHeads
     headDimension = configuration.headDimension
+    queryDimensions = numberOfHeads * headDimension
+    keyValueDimensions = numberOfKeyValueHeads * headDimension
+    gateDimensions = configuration.gating == .perHead ? numberOfHeads : 0
     scale = pow(Float(configuration.headDimension), -0.5)
     let layerType = configuration.layerTypes[layerIndex]
     usesSlidingWindow = layerType == "sliding_attention"
+    usesFusedQKVGProjection = configuration.shouldFuseQKVGProjection(
+      layerIndex: layerIndex)
     rope = configuration.rope(for: layerType)
 
     _queryProjection.wrappedValue = Linear(
-      configuration.hiddenSize,
-      numberOfHeads * headDimension,
-      bias: configuration.qkvBias
-    )
+      configuration.hiddenSize, queryDimensions, bias: configuration.qkvBias)
     _keyProjection.wrappedValue = Linear(
-      configuration.hiddenSize,
-      numberOfKeyValueHeads * headDimension,
-      bias: configuration.qkvBias
-    )
+      configuration.hiddenSize, keyValueDimensions, bias: configuration.qkvBias)
     _valueProjection.wrappedValue = Linear(
-      configuration.hiddenSize,
-      numberOfKeyValueHeads * headDimension,
-      bias: configuration.qkvBias
-    )
+      configuration.hiddenSize, keyValueDimensions, bias: configuration.qkvBias)
+    if usesFusedQKVGProjection {
+      _qkvgProjection.wrappedValue = Linear(
+        configuration.hiddenSize,
+        queryDimensions + 2 * keyValueDimensions + gateDimensions,
+        bias: configuration.qkvBias
+      )
+    }
     _outputProjection.wrappedValue = Linear(
       numberOfHeads * headDimension,
       configuration.hiddenSize,
@@ -387,19 +492,46 @@ private final class LagunaAttention: Module {
     super.init()
   }
 
+  private func project(_ x: MLXArray, useFusedQKVGProjection: Bool) -> (
+    queries: MLXArray, keys: MLXArray, values: MLXArray, gateLogits: MLXArray?
+  ) {
+    if useFusedQKVGProjection, let qkvgProjection {
+      let projected = qkvgProjection(x)
+      let keyStart = queryDimensions
+      let valueStart = keyStart + keyValueDimensions
+      let gateStart = valueStart + keyValueDimensions
+      return (
+        projected[.ellipsis, ..<keyStart],
+        projected[.ellipsis, keyStart..<valueStart],
+        projected[.ellipsis, valueStart..<gateStart],
+        gateDimensions > 0 ? projected[.ellipsis, gateStart...] : nil
+      )
+    }
+
+    guard let queryProjection, let keyProjection, let valueProjection else {
+      preconditionFailure("Laguna attention projections were not initialized")
+    }
+    return (
+      queryProjection(x), keyProjection(x), valueProjection(x), nil
+    )
+  }
+
   func core(
     _ x: MLXArray,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
-    cache: KVCache?
-  ) -> MLXArray {
+    cache: KVCache?,
+    useFusedQKVGProjection: Bool
+  ) -> (perHeadOutput: MLXArray, gateLogits: MLXArray?) {
     let batch = x.dim(0)
     let length = x.dim(1)
+    let projected = project(
+      x, useFusedQKVGProjection: useFusedQKVGProjection)
 
-    var queries = queryProjection(x).reshaped(
+    var queries = projected.queries.reshaped(
       batch, length, numberOfHeads, headDimension)
-    var keys = keyProjection(x).reshaped(
+    var keys = projected.keys.reshaped(
       batch, length, numberOfKeyValueHeads, headDimension)
-    let values = valueProjection(x).reshaped(
+    let values = projected.values.reshaped(
       batch, length, numberOfKeyValueHeads, headDimension)
 
     queries = queryNorm(queries).transposed(0, 2, 1, 3)
@@ -410,7 +542,7 @@ private final class LagunaAttention: Module {
     queries = applyRotaryPosition(rope, to: queries, offset: offset)
     keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-    return attentionWithCacheUpdate(
+    let perHeadOutput = attentionWithCacheUpdate(
       queries: queries,
       keys: keys,
       values: transposedValues,
@@ -419,11 +551,13 @@ private final class LagunaAttention: Module {
       mask: mask
     )
     .transposed(0, 2, 1, 3)
+    return (perHeadOutput, projected.gateLogits)
   }
 
   func finish(
     _ perHeadOutput: MLXArray,
     normalizedInput x: MLXArray,
+    gateLogits precomputedGateLogits: MLXArray?,
     useCompiledAttentionGate: Bool
   ) -> MLXArray {
     let batch = x.dim(0)
@@ -431,8 +565,8 @@ private final class LagunaAttention: Module {
     var output = perHeadOutput.reshaped(
       batch, length, numberOfHeads * headDimension)
 
-    if let gateProjection {
-      let gateLogits = gateProjection(x)
+    let gateLogits = precomputedGateLogits ?? gateProjection.map { $0(x) }
+    if let gateLogits {
       let perHeadOutput = output.reshaped(batch, length, numberOfHeads, headDimension)
       if useCompiledAttentionGate {
         output = compiledLagunaPerHeadAttentionGate(perHeadOutput, gateLogits).reshaped(
@@ -452,9 +586,15 @@ private final class LagunaAttention: Module {
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     cache: KVCache?
   ) -> MLXArray {
-    finish(
-      core(x, mask: mask, cache: cache),
+    let result = core(
+      x,
+      mask: mask,
+      cache: cache,
+      useFusedQKVGProjection: LagunaRuntimeTuning.useFusedQKVGProjection)
+    return finish(
+      result.perHeadOutput,
       normalizedInput: x,
+      gateLogits: result.gateLogits,
       useCompiledAttentionGate: LagunaRuntimeTuning.useCompiledAttentionGate)
   }
 }
@@ -595,6 +735,7 @@ private final class LagunaTransformerBlock: Module {
           residual: inputs[0],
           normalizedAttentionInput: inputs[1],
           perHeadAttentionOutput: inputs[2],
+          gateLogits: inputs.count == 4 ? inputs[3] : nil,
           useCompiledAttentionGate: true,
           useCompiledMoEFusion: true)
       ]
@@ -626,6 +767,7 @@ private final class LagunaTransformerBlock: Module {
     useCompiledMoEFusion: Bool,
     useCompiledAttentionGate: Bool,
     useCompiledBlockTail: Bool,
+    useFusedQKVGProjection: Bool,
     capturesHiddenStates: Bool
   ) -> MLXArray {
     // Snapshot the offset before attention mutates the cache. This keeps a
@@ -639,14 +781,21 @@ private final class LagunaTransformerBlock: Module {
       useCompiledAttentionGate: useCompiledAttentionGate,
       useCompiledMoEFusion: useCompiledMoEFusion)
     let normalizedInput = inputNorm(x)
-    let perHeadOutput = attention.core(normalizedInput, mask: mask, cache: cache)
+    let attentionResult = attention.core(
+      normalizedInput,
+      mask: mask,
+      cache: cache,
+      useFusedQKVGProjection: useFusedQKVGProjection)
     if useCompiledTail {
-      return compiledDecodeTail([x, normalizedInput, perHeadOutput])[0]
+      var inputs = [x, normalizedInput, attentionResult.perHeadOutput]
+      if let gateLogits = attentionResult.gateLogits { inputs.append(gateLogits) }
+      return compiledDecodeTail(inputs)[0]
     }
     return eagerTail(
       residual: x,
       normalizedAttentionInput: normalizedInput,
-      perHeadAttentionOutput: perHeadOutput,
+      perHeadAttentionOutput: attentionResult.perHeadOutput,
+      gateLogits: attentionResult.gateLogits,
       useCompiledAttentionGate: useCompiledAttentionGate,
       useCompiledMoEFusion: useCompiledMoEFusion)
   }
@@ -655,12 +804,14 @@ private final class LagunaTransformerBlock: Module {
     residual x: MLXArray,
     normalizedAttentionInput: MLXArray,
     perHeadAttentionOutput: MLXArray,
+    gateLogits: MLXArray?,
     useCompiledAttentionGate: Bool,
     useCompiledMoEFusion: Bool
   ) -> MLXArray {
     let attended = x + attention.finish(
       perHeadAttentionOutput,
       normalizedInput: normalizedAttentionInput,
+      gateLogits: gateLogits,
       useCompiledAttentionGate: useCompiledAttentionGate)
     if let sparseMLP = mlp as? LagunaMoE {
       return sparseMLP(
@@ -711,6 +862,7 @@ public final class LagunaModelInner: Module {
     let useCompiledMoEFusion = LagunaRuntimeTuning.useCompiledMoEFusion
     let useCompiledAttentionGate = LagunaRuntimeTuning.useCompiledAttentionGate
     let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail
+    let useFusedQKVGProjection = LagunaRuntimeTuning.useFusedQKVGProjection
     let capturesHiddenStates = !captureLayerIDs.isEmpty
     var captured = [MLXArray]()
     captured.reserveCapacity(captureLayerIDs.count)
@@ -740,6 +892,7 @@ public final class LagunaModelInner: Module {
         useCompiledMoEFusion: useCompiledMoEFusion,
         useCompiledAttentionGate: useCompiledAttentionGate,
         useCompiledBlockTail: useCompiledBlockTail,
+        useFusedQKVGProjection: useFusedQKVGProjection,
         capturesHiddenStates: capturesHiddenStates
       )
       if captureLayerIDs.contains(index) {
@@ -985,6 +1138,25 @@ public final class LagunaModel: Module, LLMModel, KVCacheDimensionProvider {
       sanitized[key] = value
     }
 
+    // Q, K, V, and the per-head attention gate all consume the same normalized
+    // token. Keep the legacy tensors for a same-loaded correctness/performance
+    // control, and add one exact row-concatenated projection when their
+    // quantization layouts are compatible. Quantized weights, scales, and
+    // affine biases are row-independent, so this does not requantize values.
+    for layerIndex in configuration.layerTypes.indices
+    where configuration.shouldFuseQKVGProjection(layerIndex: layerIndex) {
+      let prefix =
+        "language_model.model.layers.\(layerIndex).self_attn"
+      Self.duplicateQKVGProjectionWeights(
+        in: &sanitized,
+        prefix: prefix,
+        queryRows: configuration.attentionHeadsPerLayer[layerIndex]
+          * configuration.headDimension,
+        keyValueRows: configuration.keyValueHeads * configuration.headDimension,
+        gateRows: configuration.gating == .perHead
+          ? configuration.attentionHeadsPerLayer[layerIndex] : 0)
+    }
+
     // Poolside's BF16 checkpoint stores one tensor per expert, while MLX's
     // SwitchLinear consumes a single leading expert dimension. Stack those
     // tensors here so the native Swift conversion path can quantize the
@@ -1062,6 +1234,43 @@ public final class LagunaModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     return sanitized
+  }
+
+  static func duplicateQKVGProjectionWeights(
+    in weights: inout [String: MLXArray],
+    prefix: String,
+    queryRows: Int,
+    keyValueRows: Int,
+    gateRows: Int
+  ) {
+    let names = gateRows > 0
+      ? ["q_proj", "k_proj", "v_proj", "g_proj"]
+      : ["q_proj", "k_proj", "v_proj"]
+    let rowCounts = gateRows > 0
+      ? [queryRows, keyValueRows, keyValueRows, gateRows]
+      : [queryRows, keyValueRows, keyValueRows]
+
+    for suffix in ["weight", "bias", "scales", "biases"] {
+      let sourceKeys = names.map { "\(prefix).\($0).\(suffix)" }
+      let fusedKey = "\(prefix).qkvg_proj.\(suffix)"
+      if let fused = weights[fusedKey] {
+        var start = 0
+        for (key, count) in zip(sourceKeys, rowCounts) {
+          let end = start + count
+          if weights[key] == nil {
+            weights[key] =
+              fused.ndim == 1 ? fused[start..<end] : fused[start..<end, 0...]
+          }
+          start = end
+        }
+        continue
+      }
+
+      guard sourceKeys.allSatisfy({ weights[$0] != nil }) else { continue }
+      let sourceArrays = sourceKeys.map { weights[$0]! }
+      weights[fusedKey] = concatenated(
+        sourceArrays, axis: sourceArrays[0].ndim == 1 ? 0 : -2)
+    }
   }
 
   static func fuseGateUpProjectionWeights(

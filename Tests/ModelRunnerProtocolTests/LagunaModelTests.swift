@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXNN
 import Testing
 
 @testable import ModelRunnerCore
@@ -210,10 +211,152 @@ struct LagunaModelTests {
     #expect(allClose(eager, fallback, rtol: 1e-2, atol: 1e-2).item(Bool.self))
   }
 
+  @Test("QKVG fusion requires a compatible projection layout")
+  func qkvgFusionRequiresCompatibleLayout() throws {
+    let unquantized = try decodeConfiguration()
+    #expect(unquantized.shouldFuseQKVGProjection(layerIndex: 0))
+    #expect(unquantized.shouldFuseQKVGProjection(layerIndex: 1))
+
+    let uniform = try decodeConfiguration(
+      quantizationJSON:
+        """
+        {"group_size": 64, "bits": 4, "mode": "affine"}
+        """)
+    #expect(uniform.shouldFuseQKVGProjection(layerIndex: 0))
+
+    let mixedGate = try decodeConfiguration(
+      quantizationJSON:
+        """
+        {
+          "group_size": 64,
+          "bits": 4,
+          "mode": "affine",
+          "language_model.model.layers.0.self_attn.g_proj": {
+            "group_size": 64,
+            "bits": 8,
+            "mode": "affine"
+          }
+        }
+        """)
+    #expect(!mixedGate.shouldFuseQKVGProjection(layerIndex: 0))
+    #expect(mixedGate.shouldFuseQKVGProjection(layerIndex: 1))
+
+    let globalScale = try decodeConfiguration(
+      quantizationJSON:
+        """
+        {"group_size": 64, "bits": 4, "mode": "affine", "global_scale": 0.5}
+        """)
+    #expect(!globalScale.shouldFuseQKVGProjection(layerIndex: 0))
+
+    let biased = try decodeConfiguration(qkvBias: true)
+    #expect(!biased.shouldFuseQKVGProjection(layerIndex: 0))
+  }
+
+  @Test("QKVG sanitization duplicates every packed row without requantizing")
+  func qkvgSanitizationDuplicatesPackedRows() throws {
+    let configuration = try decodeConfiguration()
+    let model = LagunaModel(configuration)
+    let prefix = "language_model.model.layers.0.self_attn"
+    let rowCounts = [8, 8, 8, 2]
+    let names = ["q_proj", "k_proj", "v_proj", "g_proj"]
+    var weights = [String: MLXArray]()
+
+    for (suffixIndex, suffix) in ["weight", "scales", "biases"].enumerated() {
+      let columns = suffix == "weight" ? 2 : 1
+      var start: Int32 = Int32(1_000 * suffixIndex)
+      for (name, rows) in zip(names, rowCounts) {
+        let count = rows * columns
+        weights["\(prefix).\(name).\(suffix)"] = MLXArray(
+          (0..<count).map { start + Int32($0) }
+        ).reshaped(rows, columns)
+        start += Int32(count)
+      }
+    }
+
+    let sanitized = model.sanitize(weights: weights)
+    for suffix in ["weight", "scales", "biases"] {
+      let originals = names.map { weights["\(prefix).\($0).\(suffix)"]! }
+      let expected = concatenated(originals, axis: 0)
+      let fused = sanitized["\(prefix).qkvg_proj.\(suffix)"]!
+      eval(expected, fused)
+      #expect(expected.shape == fused.shape)
+      #expect(expected.asArray(Int32.self) == fused.asArray(Int32.self))
+      #expect(names.allSatisfy { sanitized["\(prefix).\($0).\(suffix)"] != nil })
+    }
+  }
+
+  @Test("Fused QKVG preserves cached decode logits and cache tensors")
+  func fusedQKVGPreservesCachedDecode() throws {
+    let configuration = try decodeConfiguration()
+    let model = LagunaModel(configuration)
+    var parameters = Dictionary(
+      uniqueKeysWithValues: model.parameters().flattened())
+    for layerIndex in 0..<configuration.hiddenLayers {
+      let prefix = "language_model.model.layers.\(layerIndex).self_attn"
+      let sources = ["q_proj", "k_proj", "v_proj", "g_proj"].map {
+        parameters["\(prefix).\($0).weight"]!
+      }
+      parameters["\(prefix).qkvg_proj.weight"] = concatenated(sources, axis: 0)
+    }
+    try model.update(
+      parameters: ModuleParameters.unflattened(parameters), verify: [.all])
+    eval(model)
+
+    let legacyCache = try model.newCache(parameters: nil)
+    let fusedCache = try model.newCache(parameters: nil)
+    let prompt = MLXArray([Int32(1), 2, 3])[.newAxis]
+    let legacyPrefill = LagunaRuntimeTuning.$useFusedQKVGProjection.withValue(false) {
+      model(prompt, cache: legacyCache)
+    }
+    let fusedPrefill = LagunaRuntimeTuning.$useFusedQKVGProjection.withValue(true) {
+      model(prompt, cache: fusedCache)
+    }
+    eval(legacyPrefill, fusedPrefill)
+    eval(legacyCache)
+    eval(fusedCache)
+    #expect(
+      legacyPrefill.asArray(Float.self) == fusedPrefill.asArray(Float.self))
+
+    let nextToken = MLXArray([Int32(4)])[.newAxis]
+    let legacy = LagunaRuntimeTuning.$useFusedQKVGProjection.withValue(false) {
+      LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+        model(nextToken, cache: legacyCache)
+      }
+    }
+    let fused = LagunaRuntimeTuning.$useFusedQKVGProjection.withValue(true) {
+      LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+        model(nextToken, cache: fusedCache)
+      }
+    }
+    eval(legacy, fused)
+    eval(legacyCache)
+    eval(fusedCache)
+
+    #expect(legacyCache.allSatisfy { $0.offset == 4 })
+    #expect(fusedCache.allSatisfy { $0.offset == 4 })
+    #expect(legacy.asArray(Float.self) == fused.asArray(Float.self))
+    for (legacyEntry, fusedEntry) in zip(legacyCache, fusedCache) {
+      let legacyState = legacyEntry.state
+      let fusedState = fusedEntry.state
+      eval(legacyState)
+      eval(fusedState)
+      #expect(legacyState.count == fusedState.count)
+      for (legacyTensor, fusedTensor) in zip(legacyState, fusedState) {
+        #expect(
+          legacyTensor.asArray(Float.self) == fusedTensor.asArray(Float.self))
+      }
+    }
+  }
+
   private func decodeConfiguration(
     numberOfExperts: Int = 4,
-    expertsPerToken: Int = 2
+    expertsPerToken: Int = 2,
+    qkvBias: Bool = false,
+    quantizationJSON: String? = nil
   ) throws -> LagunaConfiguration {
+    let quantizationField = quantizationJSON.map {
+      ",\n        \"quantization\": \($0)"
+    } ?? ""
     let data = Data(
       """
       {
@@ -229,7 +372,7 @@ struct LagunaModelTests {
         "max_position_embeddings": 128,
         "rms_norm_eps": 0.000001,
         "attention_bias": false,
-        "qkv_bias": false,
+        "qkv_bias": \(qkvBias),
         "gating": "per-head",
         "tie_word_embeddings": false,
         "sliding_window": 8,
@@ -254,7 +397,7 @@ struct LagunaModelTests {
             "rope_theta": 10000.0,
             "partial_rotary_factor": 1.0
           }
-        }
+        }\(quantizationField)
       }
       """.utf8
     )
