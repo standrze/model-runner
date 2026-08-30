@@ -8,6 +8,7 @@
 - Isolated rebuild of v3 binary SHA-256: `59536631ba31e251bd0f71424262aa334faa48cf86fa8d9df60afdcab97ce93c`.
 - Property-wrapper v4 binary SHA-256: `335736124f6112c2da566f53c3f687440661939874f59edec911372ecea1ac97`.
 - Single-generation-pool candidate binary SHA-256: `74611b9fd8c5de032e8a97c321f0c269ab2c2c013c25921936ad202c82db4772`.
+- Same-build single-generation-pool isolation binary SHA-256: `f7db32446acca479f92ae3cee5e39f0eb767f56176efea49d4f2e494c73879e8`.
 - Autorelease + in-place decoder v6 binary SHA-256: `b2c4a7c39d7058e38a00fba686b6a2a1464260a7abd6483144d5fa49b10537e3`.
 - Every binary uses metallib SHA-256 `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`.
 
@@ -78,3 +79,23 @@ inconclusive and remains below the predeclared `+1%` acceptance gate. This is
 weak positive directional evidence, not a measured speed milestone. The
 candidate is preserved at tag `token-loop-decoder-candidate-v1`; accepted
 production `main` remains zero-wrapper v3 at `7238a63`.
+
+## In-place decoder isolation: invalid, not promoted
+
+The same-provenance decoder isolation compares an autorelease-only binary
+against v6, with the same source/build tree and metallib. Its uninterrupted
+eight-block order was `A -> B -> B -> A -> B -> A -> A -> B`, with two warmups
+and six measured 128-token generations in every fresh process. All 64 outputs
+were byte-identical with content SHA-256
+`5b8e8efa2dd96fdc936e519d6f0922a1d4b0693dbf13167abfdea592d54d5946`;
+all correctness, Metal, per-block variance, within-block drift, and host-media
+gates passed.
+
+The raw paired geometric effect was `-0.518991%`, with a one-sided-bound span
+from `-2.209423%` to `+1.200662%`. That magnitude is invalid under the
+predeclared cross-block gates: v6 changed `-2.016804%` and `-2.501305%` within
+the two quartets, its overall block spread was `3.451136%`, and its execution-
+order strata differed by `0.532695` percentage point. Each exceeds its tight
+stability threshold. The result therefore cannot establish either a decoder
+gain or a formal regression and does not support promotion. The raw reports
+remain as reversible audit evidence; accepted production `main` is unchanged.
