@@ -1,5 +1,6 @@
 import Foundation
 import HuggingFace
+import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
@@ -43,6 +44,7 @@ enum AppError: LocalizedError {
     case usage
     case request(HTTPResponseStatus, String, String)
     case missingCompletionInfo
+    case missingMetalLibrary
 
     var errorDescription: String? {
         switch self {
@@ -52,6 +54,8 @@ enum AppError: LocalizedError {
             message
         case .missingCompletionInfo:
             "Generation ended without completion information."
+        case .missingMetalLibrary:
+            "The bundled MLX Metal library is missing."
         }
     }
 }
@@ -459,6 +463,10 @@ let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
 guard FileManager.default.fileExists(atPath: options.modelURL.path) else {
     throw AppError.request(.notFound, "Model path does not exist.", "model_not_found")
 }
+guard let metallibURL = Bundle.module.url(forResource: "mlx", withExtension: "metallib") else {
+    throw AppError.missingMetalLibrary
+}
+GPU.metallib = metallibURL
 
 print("Loading \(options.modelURL.path)…")
 let container = try await LLMModelFactory.shared.loadContainer(
