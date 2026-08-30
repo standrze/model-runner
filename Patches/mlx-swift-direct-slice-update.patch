@@ -1,8 +1,8 @@
 diff --git a/Source/MLX/MLXArray+Indexing.swift b/Source/MLX/MLXArray+Indexing.swift
-index bebaf23..afe1057 100644
+index bebaf23..75697c4 100644
 --- a/Source/MLX/MLXArray+Indexing.swift
 +++ b/Source/MLX/MLXArray+Indexing.swift
-@@ -832,6 +832,53 @@ func gatherND(
+@@ -832,6 +832,51 @@ func gatherND(
  
  // MARK: - index set (slice)
  
@@ -38,18 +38,16 @@ index bebaf23..afe1057 100644
 +            Int32(dim(0)), Int32(dim(1)), Int32(range.upperBound), Int32(dim(3)),
 +            1, 1, 1, 1,
 +            0, 0, 0, 0)
-+        var result = mlx_array_new()
-+        defer { mlx_array_free(result) }
++        let source = ctx
 +        let status = withUnsafePointer(to: &bounds) { boundsPointer in
 +            boundsPointer.withMemoryRebound(to: Int32.self, capacity: 16) { starts in
 +                mlx_slice_update(
-+                    &result, ctx, update.ctx,
++                    &ctx, source, update.ctx,
 +                    starts, 4, starts.advanced(by: 4), 4, starts.advanced(by: 8), 4,
 +                    stream.ctx)
 +            }
 +        }
-+        guard status == 0 else { return }
-+        mlx_array_set(&ctx, result)
++        assert(status == 0, "axis-2 slice update failed")
 +    }
 +}
 +
