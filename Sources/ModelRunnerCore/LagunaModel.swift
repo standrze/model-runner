@@ -18,6 +18,27 @@ import MLXNN
 public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true
   @TaskLocal public static var useCompiledMoEFusion = true
+  @TaskLocal public static var useCompiledBlockTail = false
+}
+
+enum LagunaCompiledBlockTailEligibility {
+  static func allows(
+    runtimeEnabled: Bool,
+    capturesHiddenStates: Bool,
+    batchSize: Int,
+    sequenceLength: Int,
+    cacheOffset: Int?,
+    useCompiledAttentionGate: Bool,
+    useCompiledMoEFusion: Bool
+  ) -> Bool {
+    runtimeEnabled
+      && !capturesHiddenStates
+      && batchSize == 1
+      && sequenceLength == 1
+      && (cacheOffset ?? 0) > 0
+      && useCompiledAttentionGate
+      && useCompiledMoEFusion
+  }
 }
 
 public enum LagunaConfigurationError: Error, Equatable, LocalizedError {
@@ -366,7 +387,7 @@ private final class LagunaAttention: Module {
     super.init()
   }
 
-  func callAsFunction(
+  func core(
     _ x: MLXArray,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     cache: KVCache?
@@ -389,7 +410,7 @@ private final class LagunaAttention: Module {
     queries = applyRotaryPosition(rope, to: queries, offset: offset)
     keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-    var output = attentionWithCacheUpdate(
+    return attentionWithCacheUpdate(
       queries: queries,
       keys: keys,
       values: transposedValues,
@@ -398,12 +419,22 @@ private final class LagunaAttention: Module {
       mask: mask
     )
     .transposed(0, 2, 1, 3)
-    .reshaped(batch, length, numberOfHeads * headDimension)
+  }
+
+  func finish(
+    _ perHeadOutput: MLXArray,
+    normalizedInput x: MLXArray,
+    useCompiledAttentionGate: Bool
+  ) -> MLXArray {
+    let batch = x.dim(0)
+    let length = x.dim(1)
+    var output = perHeadOutput.reshaped(
+      batch, length, numberOfHeads * headDimension)
 
     if let gateProjection {
       let gateLogits = gateProjection(x)
       let perHeadOutput = output.reshaped(batch, length, numberOfHeads, headDimension)
-      if LagunaRuntimeTuning.useCompiledAttentionGate {
+      if useCompiledAttentionGate {
         output = compiledLagunaPerHeadAttentionGate(perHeadOutput, gateLogits).reshaped(
           batch, length, numberOfHeads * headDimension)
       } else {
@@ -414,6 +445,17 @@ private final class LagunaAttention: Module {
     }
 
     return outputProjection(output)
+  }
+
+  func callAsFunction(
+    _ x: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    cache: KVCache?
+  ) -> MLXArray {
+    finish(
+      core(x, mask: mask, cache: cache),
+      normalizedInput: x,
+      useCompiledAttentionGate: LagunaRuntimeTuning.useCompiledAttentionGate)
   }
 }
 
@@ -546,6 +588,18 @@ private final class LagunaTransformerBlock: Module {
   @ModuleInfo(key: "input_layernorm") var inputNorm: RMSNorm
   @ModuleInfo(key: "post_attention_layernorm") var postAttentionNorm: RMSNorm
 
+  private lazy var compiledDecodeTail: @Sendable ([MLXArray]) -> [MLXArray] =
+    compile { [unowned self] inputs in
+      [
+        self.eagerTail(
+          residual: inputs[0],
+          normalizedAttentionInput: inputs[1],
+          perHeadAttentionOutput: inputs[2],
+          useCompiledAttentionGate: true,
+          useCompiledMoEFusion: true)
+      ]
+    }
+
   init(_ configuration: LagunaConfiguration, layerIndex: Int) {
     let attention = LagunaAttention(configuration, layerIndex: layerIndex)
     usesSlidingWindow = attention.usesSlidingWindow
@@ -569,9 +623,45 @@ private final class LagunaTransformerBlock: Module {
     _ x: MLXArray,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     cache: KVCache?,
+    useCompiledMoEFusion: Bool,
+    useCompiledAttentionGate: Bool,
+    useCompiledBlockTail: Bool,
+    capturesHiddenStates: Bool
+  ) -> MLXArray {
+    // Snapshot the offset before attention mutates the cache. This keeps a
+    // one-token prompt at offset zero on the existing prefill path.
+    let useCompiledTail = LagunaCompiledBlockTailEligibility.allows(
+      runtimeEnabled: useCompiledBlockTail,
+      capturesHiddenStates: capturesHiddenStates,
+      batchSize: x.dim(0),
+      sequenceLength: x.dim(1),
+      cacheOffset: cache?.offset,
+      useCompiledAttentionGate: useCompiledAttentionGate,
+      useCompiledMoEFusion: useCompiledMoEFusion)
+    let normalizedInput = inputNorm(x)
+    let perHeadOutput = attention.core(normalizedInput, mask: mask, cache: cache)
+    if useCompiledTail {
+      return compiledDecodeTail([x, normalizedInput, perHeadOutput])[0]
+    }
+    return eagerTail(
+      residual: x,
+      normalizedAttentionInput: normalizedInput,
+      perHeadAttentionOutput: perHeadOutput,
+      useCompiledAttentionGate: useCompiledAttentionGate,
+      useCompiledMoEFusion: useCompiledMoEFusion)
+  }
+
+  private func eagerTail(
+    residual x: MLXArray,
+    normalizedAttentionInput: MLXArray,
+    perHeadAttentionOutput: MLXArray,
+    useCompiledAttentionGate: Bool,
     useCompiledMoEFusion: Bool
   ) -> MLXArray {
-    let attended = x + attention(inputNorm(x), mask: mask, cache: cache)
+    let attended = x + attention.finish(
+      perHeadAttentionOutput,
+      normalizedInput: normalizedAttentionInput,
+      useCompiledAttentionGate: useCompiledAttentionGate)
     if let sparseMLP = mlp as? LagunaMoE {
       return sparseMLP(
         postAttentionNorm(attended),
@@ -619,6 +709,9 @@ public final class LagunaModelInner: Module {
   ) -> (hidden: MLXArray, auxiliaryHidden: MLXArray?) {
     var hidden = embedTokens(inputs)
     let useCompiledMoEFusion = LagunaRuntimeTuning.useCompiledMoEFusion
+    let useCompiledAttentionGate = LagunaRuntimeTuning.useCompiledAttentionGate
+    let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail
+    let capturesHiddenStates = !captureLayerIDs.isEmpty
     var captured = [MLXArray]()
     captured.reserveCapacity(captureLayerIDs.count)
 
@@ -644,7 +737,10 @@ public final class LagunaModelInner: Module {
         hidden,
         mask: layer.usesSlidingWindow ? slidingMask : fullMask,
         cache: cache?[index],
-        useCompiledMoEFusion: useCompiledMoEFusion
+        useCompiledMoEFusion: useCompiledMoEFusion,
+        useCompiledAttentionGate: useCompiledAttentionGate,
+        useCompiledBlockTail: useCompiledBlockTail,
+        capturesHiddenStates: capturesHiddenStates
       )
       if captureLayerIDs.contains(index) {
         let start = captureLimit.map { max(0, hidden.dim(1) - $0) } ?? 0

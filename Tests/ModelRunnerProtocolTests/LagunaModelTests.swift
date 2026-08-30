@@ -108,6 +108,108 @@ struct LagunaModelTests {
     #expect(allClose(eager, compiled, rtol: 1e-2, atol: 1e-2).item(Bool.self))
   }
 
+  @Test("Compiled block tail is restricted to ordinary cached decode")
+  func compiledBlockTailEligibilityIsDecodeOnly() {
+    func allows(
+      runtimeEnabled: Bool = true,
+      capturesHiddenStates: Bool = false,
+      batchSize: Int = 1,
+      sequenceLength: Int = 1,
+      cacheOffset: Int? = 3,
+      useCompiledAttentionGate: Bool = true,
+      useCompiledMoEFusion: Bool = true
+    ) -> Bool {
+      LagunaCompiledBlockTailEligibility.allows(
+        runtimeEnabled: runtimeEnabled,
+        capturesHiddenStates: capturesHiddenStates,
+        batchSize: batchSize,
+        sequenceLength: sequenceLength,
+        cacheOffset: cacheOffset,
+        useCompiledAttentionGate: useCompiledAttentionGate,
+        useCompiledMoEFusion: useCompiledMoEFusion)
+    }
+
+    #expect(allows())
+    #expect(!allows(runtimeEnabled: false))
+    #expect(!allows(capturesHiddenStates: true))
+    #expect(!allows(batchSize: 2))
+    #expect(!allows(sequenceLength: 2))
+    #expect(!allows(cacheOffset: nil))
+    #expect(!allows(cacheOffset: 0))
+    #expect(!allows(useCompiledAttentionGate: false))
+    #expect(!allows(useCompiledMoEFusion: false))
+  }
+
+  @Test("Compiled block tail preserves cached one-token decode logits")
+  func compiledBlockTailPreservesCachedDecodeLogits() throws {
+    let configuration = try decodeConfiguration()
+    let model = LagunaModel(configuration)
+    let eagerCache = try model.newCache(parameters: nil)
+    let compiledCache = try model.newCache(parameters: nil)
+    let prompt = MLXArray([Int32(1), 2, 3])[.newAxis]
+
+    let eagerPrefill = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(false) {
+      model(prompt, cache: eagerCache)
+    }
+    let compiledPrefill = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      model(prompt, cache: compiledCache)
+    }
+    eval(eagerPrefill, compiledPrefill)
+    eval(eagerCache)
+    eval(compiledCache)
+
+    #expect(eagerCache.allSatisfy { $0.offset == 3 })
+    #expect(compiledCache.allSatisfy { $0.offset == 3 })
+    #expect(
+      allClose(eagerPrefill, compiledPrefill, rtol: 1e-2, atol: 1e-2)
+        .item(Bool.self))
+
+    let nextToken = MLXArray([Int32(4)])[.newAxis]
+    let eager = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(false) {
+      model(nextToken, cache: eagerCache)
+    }
+    let compiled = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      model(nextToken, cache: compiledCache)
+    }
+    eval(eager, compiled)
+    eval(eagerCache)
+    eval(compiledCache)
+
+    #expect(eagerCache.allSatisfy { $0.offset == 4 })
+    #expect(compiledCache.allSatisfy { $0.offset == 4 })
+    #expect(allClose(eager, compiled, rtol: 1e-2, atol: 1e-2).item(Bool.self))
+  }
+
+  @Test("Compiled block tail flag falls back for multi-token cached input")
+  func compiledBlockTailFallsBackForMultiTokenInput() throws {
+    let configuration = try decodeConfiguration()
+    let model = LagunaModel(configuration)
+    let eagerCache = try model.newCache(parameters: nil)
+    let fallbackCache = try model.newCache(parameters: nil)
+    let prompt = MLXArray([Int32(1), 2])[.newAxis]
+
+    let eagerPrefill = model(prompt, cache: eagerCache)
+    let fallbackPrefill = model(prompt, cache: fallbackCache)
+    eval(eagerPrefill, fallbackPrefill)
+    eval(eagerCache)
+    eval(fallbackCache)
+
+    let continuation = MLXArray([Int32(3), 4])[.newAxis]
+    let eager = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(false) {
+      model(continuation, cache: eagerCache)
+    }
+    let fallback = LagunaRuntimeTuning.$useCompiledBlockTail.withValue(true) {
+      model(continuation, cache: fallbackCache)
+    }
+    eval(eager, fallback)
+    eval(eagerCache)
+    eval(fallbackCache)
+
+    #expect(eagerCache.allSatisfy { $0.offset == 4 })
+    #expect(fallbackCache.allSatisfy { $0.offset == 4 })
+    #expect(allClose(eager, fallback, rtol: 1e-2, atol: 1e-2).item(Bool.self))
+  }
+
   private func decodeConfiguration(
     numberOfExperts: Int = 4,
     expertsPerToken: Int = 2
