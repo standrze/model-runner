@@ -43,8 +43,6 @@ MLX_SWIFT_LM_MTP_DECODE_SCHEDULING_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp
 MLX_SWIFT_LM_MTP_FIRST_REJECTION_DIAGNOSTIC_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-mtp-first-rejection-diagnostic.patch"
 MLX_SWIFT_LM_CHAT_SESSION_SNAPSHOT_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-chat-session-snapshot.patch"
 MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-direct-kv-slice-update.patch"
-MLX_SWIFT_LM_GENERATION_LOOP_AUTORELEASE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-generation-loop-autorelease.patch"
-MLX_SWIFT_LM_TOKEN_LOOP_DECODER_IN_PLACE_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-token-loop-decoder-in-place.patch"
 MLX_SWIFT_LM_INCREMENTAL_BYTELEVEL_STREAMING_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-incremental-bytelevel-streaming.patch"
 MLX_SWIFT_LM_Q4_AFFINE_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-scale-search.patch"
 MLX_SWIFT_LM_Q4_AFFINE_CENTERED_SCALE_SEARCH_PATCH="$PACKAGE_ROOT/Patches/mlx-swift-lm-q4-affine-centered-scale-search.patch"
@@ -321,14 +319,6 @@ apply_dependency_patch \
   "mlx-swift-lm direct KV slice update" \
   "$MLX_SWIFT_LM_CHECKOUT" \
   "$MLX_SWIFT_LM_DIRECT_KV_SLICE_UPDATE_PATCH"
-apply_dependency_patch \
-  "mlx-swift-lm generation-loop autorelease fast path" \
-  "$MLX_SWIFT_LM_CHECKOUT" \
-  "$MLX_SWIFT_LM_GENERATION_LOOP_AUTORELEASE_PATCH"
-apply_dependency_patch \
-  "mlx-swift-lm token-loop decoder in-place fast path" \
-  "$MLX_SWIFT_LM_CHECKOUT" \
-  "$MLX_SWIFT_LM_TOKEN_LOOP_DECODER_IN_PLACE_PATCH"
 apply_dependency_patch \
   "mlx-swift-lm incremental ByteLevel streaming" \
   "$MLX_SWIFT_LM_CHECKOUT" \

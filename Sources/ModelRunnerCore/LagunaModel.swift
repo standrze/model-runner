@@ -18,6 +18,31 @@ import MLXNN
 public enum LagunaRuntimeTuning {
   @TaskLocal public static var useCompiledAttentionGate = true
   @TaskLocal public static var useCompiledMoEFusion = true
+  // `nil` lets LocalModelRunner select the Metal-only production default.
+  // Tests and the same-loaded benchmark use explicit values as scoped A/B
+  // overrides, including an explicit false control.
+  @TaskLocal public static var useCompiledBlockTail: Bool? = nil
+  @TaskLocal public static var useFusedRouterTopK: Bool? = nil
+}
+
+enum LagunaCompiledBlockTailEligibility {
+  static func allows(
+    runtimeEnabled: Bool,
+    capturesHiddenStates: Bool,
+    batchSize: Int,
+    sequenceLength: Int,
+    cacheOffset: Int?,
+    useCompiledAttentionGate: Bool,
+    useCompiledMoEFusion: Bool
+  ) -> Bool {
+    runtimeEnabled
+      && !capturesHiddenStates
+      && batchSize == 1
+      && sequenceLength == 1
+      && (cacheOffset ?? 0) > 0
+      && useCompiledAttentionGate
+      && useCompiledMoEFusion
+  }
 }
 
 public enum LagunaConfigurationError: Error, Equatable, LocalizedError {
@@ -281,14 +306,102 @@ public struct LagunaConfiguration: Decodable, Sendable {
 
 private let compiledLagunaSigmoidTopK8Router:
   @Sendable (MLXArray, MLXArray) -> (MLXArray, MLXArray) = compile { gates, correctionBias in
-    let scores = sigmoid(gates.asType(.float32))
-    let indices = argPartition(
-      -(scores + correctionBias), kth: 7, axis: -1
-    )[.ellipsis, ..<8]
-    var weights = takeAlong(scores, indices, axis: -1)
-    weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
-    return (weights.asType(gates.dtype), indices)
+    lagunaSigmoidTopK8Router(gates, correctionBias: correctionBias)
   }
+
+// Laguna routes with biased FP32 sigmoid scores, but weights the selected
+// experts with the corresponding unbiased scores. The generic chain performs
+// a full stable sort plus gather and reduction for every sparse layer. Decode
+// has exactly one 256-expert row, so one threadgroup can rank all experts and
+// normalize the eight winners without those encoder-wide barriers.
+private let lagunaRouterTopKSource = """
+    uint row = threadgroup_position_in_grid.y;
+    uint t = thread_position_in_threadgroup.x;
+
+    threadgroup ulong ranking_keys[E_];
+    threadgroup float top_scores[K_];
+
+    float score = scores[row * E_ + t];
+    float selection_score = score + correction_bias[t];
+    uint bits = (selection_score == 0.0f) ? 0u : as_type<uint>(selection_score);
+    uint monotone = isnan(selection_score)
+        ? 0xFFFFFFFFu
+        : (bits ^ ((uint)(((int)bits) >> 31) | 0x80000000u));
+
+    // The legacy path sorts `-(score + bias)` ascending and is stable. Rank
+    // larger selection scores first; for ties, rank the lower expert index
+    // first. Inverting the index in the low bits supplies that tie-break.
+    ulong key = (((ulong)monotone) << 32) | (ulong)(0xFFFFFFFFu - t);
+    ranking_keys[t] = key;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int above = 0;
+    for (uint j = 0; j < E_; ++j) {
+        above += (ranking_keys[j] > key) ? 1 : 0;
+    }
+    if (above < K_) {
+        top_scores[above] = score;
+        indices[row * K_ + above] = t;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (t == 0) {
+        float total = 0.0f;
+        for (int q = 0; q < K_; ++q) {
+            total = top_scores[q] + total;
+        }
+        total = total + 1e-20f;
+        for (int q = 0; q < K_; ++q) {
+            weights[row * K_ + q] = static_cast<T>(top_scores[q] / total);
+        }
+    }
+    """
+
+private final class LagunaRouterTopKKernel: Sendable {
+  static let shared = LagunaRouterTopKKernel()
+  let kernel: MLXFast.MLXFastKernel
+
+  private init() {
+    kernel = MLXFast.metalKernel(
+      name: "laguna_router_topk8_norm",
+      inputNames: ["scores", "correction_bias"],
+      outputNames: ["indices", "weights"],
+      source: lagunaRouterTopKSource)
+  }
+}
+
+func lagunaSigmoidTopK8Router(
+  _ gates: MLXArray,
+  correctionBias: MLXArray
+) -> (weights: MLXArray, indices: MLXArray) {
+  let scores = sigmoid(gates.asType(.float32))
+  let indices = argPartition(
+    -(scores + correctionBias), kth: 7, axis: -1
+  )[.ellipsis, ..<8]
+  var weights = takeAlong(scores, indices, axis: -1)
+  weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
+  return (weights.asType(gates.dtype), indices)
+}
+
+func fusedLagunaSigmoidTopK8Router(
+  _ gates: MLXArray,
+  correctionBias: MLXArray
+) -> (weights: MLXArray, indices: MLXArray) {
+  let scores = sigmoid(gates.asType(.float32))
+  let expertCount = scores.dim(-1)
+  precondition(expertCount == 256)
+  precondition(scores.size == expertCount)
+  precondition(correctionBias.size == expertCount)
+  let shape = Array(scores.shape.dropLast()) + [8]
+  let outputs = LagunaRouterTopKKernel.shared.kernel(
+    [scores, correctionBias],
+    template: [("T", gates.dtype), ("E_", expertCount), ("K_", 8)],
+    grid: (expertCount, 1, 1),
+    threadGroup: (expertCount, 1, 1),
+    outputShapes: [shape, shape],
+    outputDTypes: [.uint32, gates.dtype])
+  return (outputs[1], outputs[0])
+}
 
 private let compiledLagunaMoEWeightedSharedResidual: @Sendable ([MLXArray]) -> [MLXArray] = compile(
   shapeless: true
@@ -366,7 +479,7 @@ private final class LagunaAttention: Module {
     super.init()
   }
 
-  func callAsFunction(
+  func core(
     _ x: MLXArray,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     cache: KVCache?
@@ -389,7 +502,7 @@ private final class LagunaAttention: Module {
     queries = applyRotaryPosition(rope, to: queries, offset: offset)
     keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-    var output = attentionWithCacheUpdate(
+    return attentionWithCacheUpdate(
       queries: queries,
       keys: keys,
       values: transposedValues,
@@ -398,12 +511,22 @@ private final class LagunaAttention: Module {
       mask: mask
     )
     .transposed(0, 2, 1, 3)
-    .reshaped(batch, length, numberOfHeads * headDimension)
+  }
+
+  func finish(
+    _ perHeadOutput: MLXArray,
+    normalizedInput x: MLXArray,
+    useCompiledAttentionGate: Bool
+  ) -> MLXArray {
+    let batch = x.dim(0)
+    let length = x.dim(1)
+    var output = perHeadOutput.reshaped(
+      batch, length, numberOfHeads * headDimension)
 
     if let gateProjection {
       let gateLogits = gateProjection(x)
       let perHeadOutput = output.reshaped(batch, length, numberOfHeads, headDimension)
-      if LagunaRuntimeTuning.useCompiledAttentionGate {
+      if useCompiledAttentionGate {
         output = compiledLagunaPerHeadAttentionGate(perHeadOutput, gateLogits).reshaped(
           batch, length, numberOfHeads * headDimension)
       } else {
@@ -414,6 +537,17 @@ private final class LagunaAttention: Module {
     }
 
     return outputProjection(output)
+  }
+
+  func callAsFunction(
+    _ x: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    cache: KVCache?
+  ) -> MLXArray {
+    finish(
+      core(x, mask: mask, cache: cache),
+      normalizedInput: x,
+      useCompiledAttentionGate: LagunaRuntimeTuning.useCompiledAttentionGate)
   }
 }
 
@@ -456,10 +590,18 @@ private final class LagunaMoEGate: Module {
 
   func callAsFunction(
     _ x: MLXArray,
-    useCompiledFusion: Bool
+    useCompiledFusion: Bool,
+    useFusedRouterTopK: Bool = false
   ) -> (indices: MLXArray, weights: MLXArray) {
     let projected = projection(x)
     if useCompiledFusion, topK == 8, softcap == 0, scoreFunction == "sigmoid" {
+      if useFusedRouterTopK, projected.dim(-1) == 256,
+        projected.size == projected.dim(-1), correctionBias.size == 256
+      {
+        let (weights, indices) = fusedLagunaSigmoidTopK8Router(
+          projected, correctionBias: correctionBias)
+        return (indices, weights)
+      }
       let (weights, indices) = compiledLagunaSigmoidTopK8Router(
         projected, correctionBias)
       return (indices, weights)
@@ -522,13 +664,17 @@ private final class LagunaMoE: Module, UnaryLayer {
   func callAsFunction(
     _ x: MLXArray,
     adding residual: MLXArray,
-    useCompiledFusion: Bool
+    useCompiledFusion: Bool,
+    useFusedRouterTopK: Bool = false
   ) -> MLXArray {
     guard useCompiledFusion else {
       return residual + callAsFunction(x)
     }
 
-    let route = gate(x, useCompiledFusion: true)
+    let route = gate(
+      x,
+      useCompiledFusion: true,
+      useFusedRouterTopK: useFusedRouterTopK)
     let expertOutput = switchMLP(x, route.indices)
     let sharedOutput = sharedExpert(x)
     let scale = MLXArray(routedScalingFactor).asType(expertOutput.dtype)
@@ -545,6 +691,35 @@ private final class LagunaTransformerBlock: Module {
   let mlp: UnaryLayer
   @ModuleInfo(key: "input_layernorm") var inputNorm: RMSNorm
   @ModuleInfo(key: "post_attention_layernorm") var postAttentionNorm: RMSNorm
+
+  private lazy var compiledDecodeTail: @Sendable ([MLXArray]) -> [MLXArray] =
+    compile { [unowned self] inputs in
+      [
+        self.eagerTail(
+          residual: inputs[0],
+          normalizedAttentionInput: inputs[1],
+          perHeadAttentionOutput: inputs[2],
+          useCompiledAttentionGate: true,
+          useCompiledMoEFusion: true,
+          useFusedRouterTopK: false)
+      ]
+    }
+
+  // Keep a distinct trace for the candidate. Reading a TaskLocal from inside
+  // one compiled body would freeze whichever value was present at first trace
+  // and make the same-loaded A/B compare two copies of one arm.
+  private lazy var fusedRouterCompiledDecodeTail: @Sendable ([MLXArray]) -> [MLXArray] =
+    compile { [unowned self] inputs in
+      [
+        self.eagerTail(
+          residual: inputs[0],
+          normalizedAttentionInput: inputs[1],
+          perHeadAttentionOutput: inputs[2],
+          useCompiledAttentionGate: true,
+          useCompiledMoEFusion: true,
+          useFusedRouterTopK: true)
+      ]
+    }
 
   init(_ configuration: LagunaConfiguration, layerIndex: Int) {
     let attention = LagunaAttention(configuration, layerIndex: layerIndex)
@@ -569,14 +744,57 @@ private final class LagunaTransformerBlock: Module {
     _ x: MLXArray,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     cache: KVCache?,
-    useCompiledMoEFusion: Bool
+    useCompiledMoEFusion: Bool,
+    useCompiledAttentionGate: Bool,
+    useCompiledBlockTail: Bool,
+    useFusedRouterTopK: Bool,
+    capturesHiddenStates: Bool
   ) -> MLXArray {
-    let attended = x + attention(inputNorm(x), mask: mask, cache: cache)
+    // Snapshot the offset before attention mutates the cache. This keeps a
+    // one-token prompt at offset zero on the existing prefill path.
+    let useCompiledTail = LagunaCompiledBlockTailEligibility.allows(
+      runtimeEnabled: useCompiledBlockTail,
+      capturesHiddenStates: capturesHiddenStates,
+      batchSize: x.dim(0),
+      sequenceLength: x.dim(1),
+      cacheOffset: cache?.offset,
+      useCompiledAttentionGate: useCompiledAttentionGate,
+      useCompiledMoEFusion: useCompiledMoEFusion)
+    let normalizedInput = inputNorm(x)
+    let perHeadOutput = attention.core(normalizedInput, mask: mask, cache: cache)
+    if useCompiledTail {
+      if useFusedRouterTopK {
+        return fusedRouterCompiledDecodeTail([x, normalizedInput, perHeadOutput])[0]
+      }
+      return compiledDecodeTail([x, normalizedInput, perHeadOutput])[0]
+    }
+    return eagerTail(
+      residual: x,
+      normalizedAttentionInput: normalizedInput,
+      perHeadAttentionOutput: perHeadOutput,
+      useCompiledAttentionGate: useCompiledAttentionGate,
+      useCompiledMoEFusion: useCompiledMoEFusion,
+      useFusedRouterTopK: false)
+  }
+
+  private func eagerTail(
+    residual x: MLXArray,
+    normalizedAttentionInput: MLXArray,
+    perHeadAttentionOutput: MLXArray,
+    useCompiledAttentionGate: Bool,
+    useCompiledMoEFusion: Bool,
+    useFusedRouterTopK: Bool
+  ) -> MLXArray {
+    let attended = x + attention.finish(
+      perHeadAttentionOutput,
+      normalizedInput: normalizedAttentionInput,
+      useCompiledAttentionGate: useCompiledAttentionGate)
     if let sparseMLP = mlp as? LagunaMoE {
       return sparseMLP(
         postAttentionNorm(attended),
         adding: attended,
-        useCompiledFusion: useCompiledMoEFusion)
+        useCompiledFusion: useCompiledMoEFusion,
+        useFusedRouterTopK: useFusedRouterTopK)
     }
     return attended + mlp(postAttentionNorm(attended))
   }
@@ -619,6 +837,10 @@ public final class LagunaModelInner: Module {
   ) -> (hidden: MLXArray, auxiliaryHidden: MLXArray?) {
     var hidden = embedTokens(inputs)
     let useCompiledMoEFusion = LagunaRuntimeTuning.useCompiledMoEFusion
+    let useCompiledAttentionGate = LagunaRuntimeTuning.useCompiledAttentionGate
+    let useCompiledBlockTail = LagunaRuntimeTuning.useCompiledBlockTail ?? false
+    let useFusedRouterTopK = LagunaRuntimeTuning.useFusedRouterTopK ?? false
+    let capturesHiddenStates = !captureLayerIDs.isEmpty
     var captured = [MLXArray]()
     captured.reserveCapacity(captureLayerIDs.count)
 
@@ -644,7 +866,11 @@ public final class LagunaModelInner: Module {
         hidden,
         mask: layer.usesSlidingWindow ? slidingMask : fullMask,
         cache: cache?[index],
-        useCompiledMoEFusion: useCompiledMoEFusion
+        useCompiledMoEFusion: useCompiledMoEFusion,
+        useCompiledAttentionGate: useCompiledAttentionGate,
+        useCompiledBlockTail: useCompiledBlockTail,
+        useFusedRouterTopK: useFusedRouterTopK,
+        capturesHiddenStates: capturesHiddenStates
       )
       if captureLayerIDs.contains(index) {
         let start = captureLimit.map { max(0, hidden.dim(1) - $0) } ?? 0
