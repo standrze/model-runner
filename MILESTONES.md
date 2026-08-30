@@ -42,6 +42,11 @@ control drift remains just outside the strict stability boundary. Raw evidence
 is under `benchmark-results/incremental-final-binary-20260830/` and
 `benchmark-results/laguna-compiled-block-tail-20260830/`.
 
+The subsequent fused Laguna QKVG projection was rejected. Its same-loaded
+screening arm measured `-0.171863260430%`, and the 128-token legacy and fused
+streams diverged after 304 output characters. Raw failure evidence is under
+`benchmark-results/laguna-fused-qkvg-20260830/`; no accepted branch changed.
+
 ## Performance milestone index
 
 | Tag | Commit | Status | Result or disposition |
@@ -66,6 +71,8 @@ is under `benchmark-results/incremental-final-binary-20260830/` and
 | `incremental-fast-path-final-binary-measured-v1` | this commit | Definitive same-final-binary measurement | `+2.466914598390%` v2 balanced; `+2.213684635318%` confirmation; stability recheck required |
 | `laguna-compiled-block-tail-candidate-v1` | `b103114` | Guarded decode-only compiled tail | Nine focused Laguna tests passed |
 | `laguna-compiled-block-tail-measured-v1` | this commit | Same-loaded alternating A/B evidence | `177.499062770142 tok/s`, `+0.935598000375%`; correct but below gate and Ollama |
+| `laguna-fused-qkvg-candidate-v1` | `f6feaf2` | Guarded fused Q/K/V/gate projection | Short-horizon tests passed; Release screening required |
+| `laguna-fused-qkvg-rejected-v1` | this commit | Same-loaded failure evidence | `-0.171863260430%`; 128-token streams diverged; rejected |
 
 ## Clean incremental candidate
 
@@ -107,6 +114,27 @@ default outside its explicit runtime benchmark A/B mode.
 All measured outputs match exactly. This candidate is a rollback boundary and
 an input to the next attention-side experiment, not an accepted production
 change.
+
+## Rejected fused Laguna QKVG candidate
+
+Branch `codex/fused-qkvg-fast-path` retains a diagnostic-only QKVG projection
+on top of the compiled block-tail milestone. Both tensor layouts coexist so a
+single loaded checkpoint can alternate legacy and fused execution.
+
+- Source tag: `laguna-fused-qkvg-candidate-v1`
+- Candidate release binary SHA-256:
+  `09bfa82661f9f16755ce5538b51174543b93ec021527f92c6f296baf184c9f0f`
+- Shared metallib SHA-256:
+  `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`
+- Same-loaded median: legacy `168.565299333401 tok/s`, fused
+  `168.275597514012 tok/s`
+- Effect: `-0.171863260430%`
+
+The absolute rates are not a valid Ollama comparison because unrelated host
+workers were active. The candidate is nevertheless decisively rejected: the
+relative effect is negative and the deterministic 128-token streams are not
+identical. This rollback boundary exists to prevent the failed path from being
+rediscovered or accidentally consolidated.
 
 ## Standalone Swift server
 
