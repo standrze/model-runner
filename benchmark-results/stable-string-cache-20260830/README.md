@@ -43,10 +43,47 @@ Stable-string candidate binary SHA-256:
 Both use metallib SHA-256
 `903daf038bc9e65c6b77ccb3dc023df6435cf50d4d2dc78ed950a711f68be48c`.
 
+## Clean performance campaign
+
+The frozen composite control and stable-string candidate were measured in both
+orders. Each block used two warmups followed by six measured target-only
+generations, with a 79-token uncached prompt, greedy sampling, and 128 requested
+tokens.
+
+| Order/block | Median decode (tok/s) |
+| --- | ---: |
+| Forward A1: composite control | `175.97682816882792` |
+| Forward B1: stable-string cache | `175.53771931650454` |
+| Forward B2: stable-string cache | `173.748528924641` |
+| Forward A2: composite control | `176.06868153737022` |
+| Reverse B3: stable-string cache | `175.45151503185548` |
+| Reverse A3: composite control | `175.58745453697975` |
+| Reverse A4: composite control | `175.82623574957296` |
+| Reverse B4: stable-string cache | `175.42245952227427` |
+
+The forward `A -> B -> B -> A` bracket produced geometric means of
+`176.022748861656765 tok/s` for the composite control and
+`174.640832859984954 tok/s` for the cache, an exact
+`-0.785078071220169%` effect.
+
+The reverse `B -> A -> A -> B` bracket produced geometric means of
+`175.706804581058918 tok/s` for the composite control and
+`175.436986675550742 tok/s` for the cache, an exact
+`-0.153561443537431%` effect.
+
+The order-balanced geometric effect is exactly `-0.469820625871742%`.
+The order-effect spread is `0.631516627682738` percentage points. Both orders
+therefore agree that the cache is slower, even though the magnitude varies.
+
+All 48 measured generations produced exactly 128 tokens with stop reason
+`length`. In each raw block, concatenating `.trials[].content` and hashing it
+with SHA-256 produced the same digest:
+`cde803c2ceb8ffc04563bb24b42de11575b3c56359074a5fa137f7a0fddde348`.
+
 ## Decision
 
-Correctness and reproducibility gates pass. Performance is not yet established:
-macOS Photos `mediaanalysisd` was actively consuming CPU and Metal during the
-smoke, so its `173.85 tok/s` observation is diagnostic only. Preserve this as
-an isolated candidate and do not promote it until clean forward and reverse
-brackets compare it with the frozen composite control.
+Reject the stable-string cache for production and do not promote it. Its
+correctness gates pass, but both clean execution orders regress the frozen
+composite control and the balanced result is negative. Preserve the candidate
+source, smoke report, and raw benchmark campaign as a reversible negative
+milestone.
