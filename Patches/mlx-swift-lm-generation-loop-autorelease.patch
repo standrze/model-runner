@@ -1,0 +1,10 @@
+diff --git a/Libraries/MLXLMCommon/Evaluate.swift b/Libraries/MLXLMCommon/Evaluate.swift
+--- a/Libraries/MLXLMCommon/Evaluate.swift
++++ b/Libraries/MLXLMCommon/Evaluate.swift
+@@ -2344,5 +2344,5 @@ private func generateLoopTask<
+             // post-loop block below assigns `.cancelled`; Stream().synchronize() still
+             // settles any in-flight evaluation at the end of the task body.
+             tokenLoop: while !Task.isCancelled {
+-                guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
++                guard let token = iterator.next() else { break }
+                 tokenCollector.record(token)
